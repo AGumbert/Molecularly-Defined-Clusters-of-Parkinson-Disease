@@ -1,4 +1,3 @@
-# Molecularly-Defined-Clusters-of-Parkinson-Disease
 
 =============================================================================================
 ====================== Overview of Repository and Processing Pipelines ======================
