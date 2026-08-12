@@ -3,7 +3,7 @@
 ====================== Overview of Repository and Processing Pipelines ======================
 =============================================================================================
 
-This repository contains code files to support analysis of transcriptomic and proteomic data from PPMI. After processing the transcriptomic and proteomic data, files in this repository perform clustering with the iClusterPlus package and then test the resulting clusters for clinical and biological implications. The majority of the code in this repository contributed to the thesis project for the Biomedical Informatics master's program at Harvard Medical School.
+This repository contains code files to support analysis of transcriptomic and proteomic data from the Parkinson's Progression Markers Initiative (PPMI). After processing the transcriptomic and proteomic data, files in this repository perform clustering with the iClusterPlus package and then test the resulting clusters for clinical and biological implications. The majority of the code in this repository contributed to the thesis project for the Biomedical Informatics master's program at Harvard Medical School.
 
 Citation for the thesis project:
 
