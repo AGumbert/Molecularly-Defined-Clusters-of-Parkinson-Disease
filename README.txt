@@ -3,7 +3,12 @@
 ====================== Overview of Repository and Processing Pipelines ======================
 =============================================================================================
 
-This repository contains code files to support analysis of transcriptomic and proteomic data from PPMI. After processing the transcriptomic and proteomic data, files in this repository perform clustering with the iClusterPlus package and then test the resulting clusters for clinical and biological implications.
+This repository contains code files to support analysis of transcriptomic and proteomic data from PPMI. After processing the transcriptomic and proteomic data, files in this repository perform clustering with the iClusterPlus package and then test the resulting clusters for clinical and biological implications. The majority of the code in this repository contributed to the thesis project for the Biomedical Informatics master's program at Harvard Medical School.
+
+Citation for the thesis project:
+
+Gumbert, A. B. (2026). Investigating Molecularly Defined Clusters of Parkinson’s Disease Based on Multi-Omics Data With Clinical and Biological Implications (Order No. 32699177) [Master’s thesis, Harvard Medical School]. Available from ProQuest Dissertations & Theses Global. (3344109178). https://www.proquest.com/docview/3344109178.
+
 
 Here is a brief overview of the current files in the processing pipelines in this repository.
 
