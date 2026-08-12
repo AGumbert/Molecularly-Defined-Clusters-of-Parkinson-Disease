@@ -124,7 +124,7 @@ This file results in:
 
 Description:
 
-This file performs clustering analysis with the selected multi-omics features from PPMI_Data_Exploration_Transcriptomics_based_on_UPDRS.Rmd and PPMI_Data_Exploration_Proteomics_based_on_UPDRS.Rmd. The file considers the full cohort of sporadic cases, even those that did not have sufficient UPDRS data to qualify for a UPDRS-based cluster assignment. Accordingly, this program loads and processes the omics data directly from the raw files to capture all sporadic cases. With the clustering results, this file tests the clusters for clinical implications and differences with respect to covariates. 
+This file performs clustering analysis with the selected multi-omics features from PPMI_Data_Exploration_Transcriptomics_based_on_UPDRS.Rmd and PPMI_Data_Exploration_Proteomics_based_on_UPDRS.Rmd. The file considers the full cohort of sporadic cases, even those that did not have sufficient UPDRS data to qualify for a UPDRS-based cluster assignment. Accordingly, this program loads and processes the omics data directly from the raw files to capture all sporadic cases. With the clustering results, this file tests the clusters for clinical implications and differences with respect to covariates. Important to note that some analyses in this file are exploratory and do not necessarily contribute to the thesis or other published products from this investigation.
 
 This file requires access to:
 
