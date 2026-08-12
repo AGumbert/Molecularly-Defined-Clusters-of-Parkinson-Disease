@@ -1,0 +1,461 @@
+---
+title: "PPMI Proteomic Data Exploration based on UPDRS"
+author: "Andrew Gumbert"
+date: "September 2025 - April 2026"
+output: html_document
+---
+
+Description:
+
+This file  considers the UPDRS-based clusters from PPMI_UPDRS_Cluster_Creation.Rmd. The file also considers plasma, CSF, and urine proteomics data from Olink, SomaScan, and mass spectrometry. The code in this file acquires the numbers of cases with usable data from each type of proteomic modality. The file finds proteins that have relatively high differential expression by UPDRS cluster to identify candidate features for the creation of molecularly defined clusters. The resulting differentially expressed features are saved in text files, enabling further analyses and cluster creation. 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+
+```{r}
+# loads relevant libraries
+library(ggplot2)
+library(readxl)
+
+# loads tidyverse
+library(tidyverse)
+library(dplyr)
+```
+
+
+### The following code blocks examine the plasma proteomics data from PPMI projects 9000 and 177.
+
+##### The code uses the cluster assignments from the "PPMI_UPDRS_Cluster_Creation.Rmd" file.
+
+```{r}
+# gets PPMI plasma proteomic data from the combined panels (Project 9000)
+proteomic_data_plasma_project_9000 <- rbind(read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_9000_Plasma_Cardio_NPX_05Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_9000_Plasma_INF_NPX_05Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_9000_Plasma_NEURO_NPX_05Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_9000_Plasma_ONC_NPX_05Sep2025.csv")))
+
+length(unique(proteomic_data_plasma_project_9000$PATNO))
+
+
+# filters to sporadic PD cases with cluster assignments at baseline
+# Credit to https://www.digitalocean.com/community/tutorials/substring-function-in-r
+# for help with the substring function.
+proteomic_data_plasma_project_9000 <- proteomic_data_plasma_project_9000 %>% dplyr::filter(QC_WARNING == "PASS") %>% mutate(PATNO = substring(PATNO, 6, length(PATNO))) %>% dplyr::filter(PATNO %in% c(cluster_A_patients_overall, cluster_B_patients_overall) & EVENT_ID == "BL") %>% mutate(clust = case_when(PATNO %in% cluster_A_patients_overall ~ "A", PATNO %in% cluster_B_patients_overall ~ "B"))
+
+# gets number of patients in the proteomic dataset with a cluster assignment
+length(unique(proteomic_data_plasma_project_9000$PATNO))
+
+```
+
+
+
+
+```{r}
+# checks how many cases with BL plasma proteomic data are in each UPDRS-based cluster
+sum(unique(proteomic_data_plasma_project_9000$PATNO) %in% cluster_A_patients_overall)
+sum(unique(proteomic_data_plasma_project_9000$PATNO) %in% cluster_B_patients_overall)
+```
+
+
+
+```{r}
+# gets PPMI plasma proteomic data from Project 177
+proteomic_data_plasma_project_177 <- read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_177_Untargeted_Proteomics_24Oct2025.csv")) %>% dplyr::filter(TYPE == "Plasma")
+
+length(unique(proteomic_data_plasma_project_177$PATNO))
+
+# filters to sporadic PD cases with cluster assignments at baseline
+proteomic_data_plasma_project_177 <- proteomic_data_plasma_project_177 %>% dplyr::filter(PATNO %in% c(cluster_A_patients_overall, cluster_B_patients_overall) & CLINICAL_EVENT == "BL") %>% mutate(clust = case_when(PATNO %in% cluster_A_patients_overall ~ "A", PATNO %in% cluster_B_patients_overall ~ "B"))
+
+# gets number of patients in the proteomic dataset with a cluster assignment
+length(unique(proteomic_data_plasma_project_177$PATNO))
+```
+
+```{r}
+# checks how many cases with BL plasma proteomic data are in each UPDRS-based cluster
+sum(unique(proteomic_data_plasma_project_177$PATNO) %in% cluster_A_patients_overall)
+sum(unique(proteomic_data_plasma_project_177$PATNO) %in% cluster_B_patients_overall)
+```
+
+
+
+```{r}
+# checks for total number of unique participants across the two plasma projects
+unique_plasma_participants <- unique(c(proteomic_data_plasma_project_9000$PATNO, proteomic_data_plasma_project_177$PATNO))
+length(unique_plasma_participants)
+
+# checks how many cases with BL plasma proteomic data are in each cluster
+sum(unique_plasma_participants %in% cluster_A_patients_overall)
+sum(unique_plasma_participants %in% cluster_B_patients_overall)
+```
+
+
+
+### The following code blocks examine the CSF proteomics data from PPMI projects 9000 and 177.
+
+
+
+### The following code blocks examine the CSF proteomics data from PPMI project 9000.
+
+```{r}
+# gets PPMI CSF proteomic data from the combined panels (Project 9000)
+proteomic_data_CSF_project_9000 <- rbind(read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_9000_CSF_Cardio_NPX_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_9000_CSF_INF_NPX_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_9000_CSF_NEU_NPX_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_9000_CSF_ONC_NPX_23Sep2025.csv")))
+
+length(unique(proteomic_data_CSF_project_9000$PATNO))
+
+
+# filters to sporadic PD cases with cluster assignments at baseline
+# Credit to https://www.digitalocean.com/community/tutorials/substring-function-in-r
+# for help with the substring function.
+proteomic_data_CSF_project_9000 <- proteomic_data_CSF_project_9000 %>% dplyr::filter(QC_WARNING == "PASS") %>% mutate(PATNO = substring(PATNO, 6, length(PATNO))) %>% dplyr::filter(PATNO %in% c(cluster_A_patients_overall, cluster_B_patients_overall) & EVENT_ID == "BL") %>% mutate(clust = case_when(PATNO %in% cluster_A_patients_overall ~ "A", PATNO %in% cluster_B_patients_overall ~ "B"))
+
+# gets number of patients in the proteomic dataset with a cluster assignment
+length(unique(proteomic_data_CSF_project_9000$PATNO))
+
+```
+
+
+```{r}
+# checks how many cases with BL CSF proteomic data are in each UPDRS-based cluster
+sum(unique(proteomic_data_CSF_project_9000$PATNO) %in% cluster_A_patients_overall)
+sum(unique(proteomic_data_CSF_project_9000$PATNO) %in% cluster_B_patients_overall)
+```
+
+
+```{r}
+# gets PPMI CSF proteomic data from Project 177
+proteomic_data_CSF_project_177 <- read.csv(file.path(main_directory, "Proteomic_Analysis/PPMI_Project_177_Untargeted_Proteomics_24Oct2025.csv")) %>% dplyr::filter(TYPE == "Cerebrospinal Fluid")
+
+length(unique(proteomic_data_CSF_project_177$PATNO))
+
+# filters to sporadic PD cases with cluster assignments at baseline
+proteomic_data_CSF_project_177 <- proteomic_data_CSF_project_177 %>% dplyr::filter(PATNO %in% c(cluster_A_patients_overall, cluster_B_patients_overall) & CLINICAL_EVENT == "BL") %>% mutate(clust = case_when(PATNO %in% cluster_A_patients_overall ~ "A", PATNO %in% cluster_B_patients_overall ~ "B"))
+
+# gets number of patients in the proteomic dataset with a cluster assignment
+length(unique(proteomic_data_CSF_project_177$PATNO))
+```
+
+```{r}
+# checks how many cases with BL CSF proteomic data are in each UPDRS-based cluster
+sum(unique(proteomic_data_CSF_project_177$PATNO) %in% cluster_A_patients_overall)
+sum(unique(proteomic_data_CSF_project_177$PATNO) %in% cluster_B_patients_overall)
+```
+
+```{r}
+# checks for total number of unique participants across the two CSF projects
+unique_CSF_participants <- unique(c(proteomic_data_CSF_project_9000$PATNO, proteomic_data_CSF_project_177$PATNO))
+length(unique_CSF_participants)
+
+# checks how many cases with BL CSF proteomic data are in each cluster
+sum(unique_CSF_participants %in% cluster_A_patients_overall)
+sum(unique_CSF_participants %in% cluster_B_patients_overall)
+```
+
+
+
+
+### The following code blocks examine the CSF proteomics data from PPMI project 151.
+
+
+```{r}
+# gets PPMI pQTL CSF proteomic data from the combined files (Project 151)
+
+# This line loads the CSF data after the PPMI batch correction
+proteomic_data_CSF_project_151 <- rbind(read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_1_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_2_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_3_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_4_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_5_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_6_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_7_of_7_Batch_Corrected__15Feb2026.csv")))
+
+length(unique(proteomic_data_CSF_project_151$PATNO))
+
+
+# filters to participants in clusters A and B with data at baseline
+# Credit to https://www.digitalocean.com/community/tutorials/substring-function-in-r
+# for help with the substring function.
+proteomic_data_CSF_project_151 <- proteomic_data_CSF_project_151 %>% dplyr::filter(PATNO %in% c(cluster_A_patients_overall, cluster_B_patients_overall) & CLINICAL_EVENT == "BL") %>% mutate(clust = case_when(PATNO %in% cluster_A_patients_overall ~ "A", PATNO %in% cluster_B_patients_overall ~ "B"))
+
+# gets number of remaining participants in the proteomic dataset (sporadic cases and healthy controls)
+length(unique(proteomic_data_CSF_project_151$PATNO))
+
+```
+
+```{r}
+# checks how many cases with BL CSF proteomic data from project 151 are in each group
+sum(unique(proteomic_data_CSF_project_151$PATNO) %in% cluster_A_patients_overall)
+sum(unique(proteomic_data_CSF_project_151$PATNO) %in% cluster_B_patients_overall)
+```
+
+
+
+
+
+### The following code blocks examine the urine proteomics data from PPMI project 190.
+
+```{r}
+# gets PPMI Urine proteomic data from the combined panels (Project 190)
+proteomic_data_urine_project_190 <- rbind(read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_1_of_5_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_2_of_5_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_3_of_5_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_4_of_5_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_5_of_5_23Sep2025.csv")))
+
+length(unique(proteomic_data_urine_project_190$PATNO))
+
+
+# filters to sporadic PD cases with cluster assignments at baseline
+proteomic_data_urine_project_190 <- proteomic_data_urine_project_190 %>% dplyr::filter(PATNO %in% c(cluster_A_patients_overall, cluster_B_patients_overall) & CLINICAL_EVENT == "BL") %>% mutate(clust = case_when(PATNO %in% cluster_A_patients_overall ~ "A", PATNO %in% cluster_B_patients_overall ~ "B"))
+
+# gets number of patients in the proteomic dataset with a cluster assignment
+length(unique(proteomic_data_urine_project_190$PATNO))
+
+```
+
+```{r}
+# checks how many cases with BL urine proteomic data are in each UPDRS-based cluster
+sum(unique(proteomic_data_urine_project_190$PATNO) %in% cluster_A_patients_overall)
+sum(unique(proteomic_data_urine_project_190$PATNO) %in% cluster_B_patients_overall)
+```
+
+
+
+
+
+### The following code blocks use wilcox tests to get pvalues and pvalue distributions for the baseline urine proteomic data
+
+```{r}
+# ensures all participants have at most one recorded result for each test
+# credit to https://www.rdocumentation.org/packages/base/versions/3.6.2/topics/duplicated
+# for help with the duplicated function
+sum(!duplicated(proteomic_data_urine_project_190 %>% dplyr::select(PATNO, TESTNAME))) == nrow(proteomic_data_urine_project_190)
+```
+
+
+```{r, warning=FALSE}
+# gets a list of test names from the urine samples
+test_name_list_urine <- unique(proteomic_data_urine_project_190$TESTNAME)
+
+# plots histogram of the distribution of how many cases correspond to each test
+hist(sapply(1:length(test_name_list_urine), function(i){sum(proteomic_data_urine_project_190$TESTNAME == test_name_list_urine[i])}), xlab = "Number of Patients with Test Data", ylab = "Number of Tests", main = "Distribution of Numbers of Patients with Test Data for Each Test (Urine)")
+abline(v = length(unique(proteomic_data_urine_project_190$PATNO)) * 0.9, col = "red")
+
+# filters to only tests with < 10% missingness for downstream analyses
+test_name_list_urine_low_missingness <- test_name_list_urine[sapply(1:length(test_name_list_urine), function(i){sum(proteomic_data_urine_project_190$TESTNAME == test_name_list_urine[i]) > (length(unique(proteomic_data_urine_project_190$PATNO)) * 0.9)})]
+
+```
+
+```{r}
+# gets number of test names and those with low missingness and checks for uniqueness
+length(test_name_list_urine)
+length(unique(test_name_list_urine))
+
+length(test_name_list_urine_low_missingness)
+length(unique(test_name_list_urine_low_missingness))
+```
+
+```{r}
+# uses the tests with low missingness to get pvalues and pvalue distributions from across UPDRS-based clusters
+test_name_clust_pvals_urine <- sapply(test_name_list_urine_low_missingness, function(tn){wilcox.test(proteomic_data_urine_project_190[proteomic_data_urine_project_190$TESTNAME == tn & proteomic_data_urine_project_190$clust == "A" & proteomic_data_urine_project_190$CLINICAL_EVENT == "BL",]$TESTVALUE, proteomic_data_urine_project_190[proteomic_data_urine_project_190$TESTNAME == tn & proteomic_data_urine_project_190$clust == "B" & proteomic_data_urine_project_190$CLINICAL_EVENT == "BL",]$TESTVALUE)$p.value})
+
+hist(test_name_clust_pvals_urine)
+
+# credit to https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/p.adjust
+# for help with the p.adjust function
+test_name_clust_adj_pvals_urine <- p.adjust(test_name_clust_pvals_urine, method = "BH")
+
+hist(test_name_clust_adj_pvals_urine)
+
+protein_clust_test_results_urine <- data.frame(TESTNAME = names(test_name_clust_pvals_urine), pval = test_name_clust_pvals_urine, padj = test_name_clust_adj_pvals_urine) %>% arrange(padj)
+
+# gets total number of proteins and checks for uniqueness
+length(protein_clust_test_results_urine$TESTNAME)
+length(unique(protein_clust_test_results_urine$TESTNAME))
+
+# gets count and percentage of p-vals less than 0.05
+sum(protein_clust_test_results_urine$pval < 0.05)
+mean(protein_clust_test_results_urine$pval < 0.05)
+
+# gets count and percentage of adj p-vals less than 0.05
+sum(protein_clust_test_results_urine$padj < 0.05)
+mean(protein_clust_test_results_urine$padj < 0.05)
+
+```
+
+
+
+
+### The following code blocks use wilcox tests for differential expression to get p-values and p-value distributions for the baseline CSF proteomic data (project 151)
+
+```{r}
+# ensure all remaining participants have at most one recorded result for each test
+# credit to https://www.rdocumentation.org/packages/base/versions/3.6.2/topics/duplicated
+# for help with the duplicated function
+sum(!duplicated(proteomic_data_CSF_project_151 %>% dplyr::select(PATNO, TESTNAME))) == nrow(proteomic_data_CSF_project_151)
+```
+
+
+```{r, warning=FALSE}
+# gets a list of test names from the CSF samples
+test_name_list_CSF <- unique(proteomic_data_CSF_project_151$TESTNAME)
+
+# plots histogram of the distribution of how many cases correspond to each test
+hist(sapply(1:length(test_name_list_CSF), function(i){sum(proteomic_data_CSF_project_151$TESTNAME == test_name_list_CSF[i])}), xlab = "Number of Patients with Test Data", ylab = "Number of Tests", main = "Distribution of Numbers of Patients with Test Data for Each Test (CSF)")
+abline(v = length(unique(proteomic_data_CSF_project_151$PATNO)) * 0.9, col = "red")
+
+# filters to only tests with <= 10% missingness for downstream analyses
+test_name_list_CSF_low_missingness <- test_name_list_CSF[sapply(1:length(test_name_list_CSF), function(i){sum(proteomic_data_CSF_project_151$TESTNAME == test_name_list_CSF[i]) > (length(unique(proteomic_data_CSF_project_151$PATNO)) * 0.9)})]
+
+```
+
+
+```{r}
+# gets number of test names and those with low missingness and checks for uniqueness
+length(test_name_list_CSF)
+length(unique(test_name_list_CSF))
+
+length(test_name_list_CSF_low_missingness)
+length(unique(test_name_list_CSF_low_missingness))
+```
+
+```{r}
+# applies a Wilcoxon test to each protein with low missingness across cluster A vs cluster B
+test_name_clust_pvals_CSF <- sapply(test_name_list_CSF_low_missingness, function(tn){wilcox.test(proteomic_data_CSF_project_151[proteomic_data_CSF_project_151$TESTNAME == tn & proteomic_data_CSF_project_151$clust == "A" & proteomic_data_CSF_project_151$CLINICAL_EVENT == "BL",]$TESTVALUE, proteomic_data_CSF_project_151[proteomic_data_CSF_project_151$TESTNAME == tn & proteomic_data_CSF_project_151$clust == "B" & proteomic_data_CSF_project_151$CLINICAL_EVENT == "BL",]$TESTVALUE)$p.value})
+
+hist(test_name_clust_pvals_CSF)
+
+# credit to https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/p.adjust
+# for help with the p.adjust function
+test_name_clust_adj_pvals_CSF <- p.adjust(test_name_clust_pvals_CSF, method = "BH")
+
+hist(test_name_clust_adj_pvals_CSF)
+
+protein_clust_test_results_CSF <- data.frame(TESTNAME = names(test_name_clust_pvals_CSF), pval = test_name_clust_pvals_CSF, padj = test_name_clust_adj_pvals_CSF) %>% arrange(padj)
+
+# gets total number of proteins and checks for uniqueness
+length(protein_clust_test_results_CSF$TESTNAME)
+length(unique(protein_clust_test_results_CSF$TESTNAME))
+
+# gets count and percentage of p-vals less than 0.05
+sum(protein_clust_test_results_CSF$pval < 0.05)
+mean(protein_clust_test_results_CSF$pval < 0.05)
+
+# gets count and percentage of adj p-vals less than 0.05
+sum(protein_clust_test_results_CSF$padj < 0.05)
+mean(protein_clust_test_results_CSF$padj < 0.05)
+
+```
+
+
+
+### The following code blocks get metadata and protein expression data of proteins meeting a signficance threshold to use in logistic regression and proteomic-based clustering.
+
+```{r}
+# selects proteins with p-vals less than 0.01 to use in downstream analyses from project 190 (urine)
+
+urine_prots_meeting_threshold <- protein_clust_test_results_urine[protein_clust_test_results_urine$pval < 0.01,]$TESTNAME
+length(urine_prots_meeting_threshold)
+
+
+# gets data frames of baseline proteomic expression measurements 
+proteomic_exp_data_meeting_threshold_urine <- proteomic_data_urine_project_190 %>% dplyr::filter(CLINICAL_EVENT == "BL") %>% dplyr::select(PATNO, TESTNAME, TESTVALUE) %>% dplyr::filter(TESTNAME %in% urine_prots_meeting_threshold) %>% pivot_wider(id_cols = "PATNO", values_from = "TESTVALUE", names_from = "TESTNAME") %>% arrange(PATNO) %>% column_to_rownames("PATNO")
+
+
+# checks dimensions of resulting dataframe
+dim(proteomic_exp_data_meeting_threshold_urine)
+
+# gets number of patients in each longitudinal cluster
+sum(row.names(proteomic_exp_data_meeting_threshold_urine) %in% cluster_A_patients_overall)
+sum(row.names(proteomic_exp_data_meeting_threshold_urine) %in% cluster_B_patients_overall)
+```
+
+
+```{r}
+# selects proteins with p-vals less than 0.01 to use in downstream analyses from project 151 (CSF)
+
+CSF_prots_meeting_threshold <- protein_clust_test_results_CSF[protein_clust_test_results_CSF$pval < 0.01,]$TESTNAME
+length(CSF_prots_meeting_threshold)
+
+
+# gets data frames of baseline proteomic expression measurements 
+proteomic_exp_data_meeting_threshold_CSF <- proteomic_data_CSF_project_151 %>% dplyr::filter(CLINICAL_EVENT == "BL") %>% dplyr::select(PATNO, TESTNAME, TESTVALUE) %>% dplyr::filter(TESTNAME %in% CSF_prots_meeting_threshold) %>% pivot_wider(id_cols = "PATNO", values_from = "TESTVALUE", names_from = "TESTNAME") %>% arrange(PATNO) %>% column_to_rownames("PATNO")
+
+
+# checks dimensions of resulting dataframe
+dim(proteomic_exp_data_meeting_threshold_CSF)
+
+# gets number of patients in each longitudinal cluster
+sum(row.names(proteomic_exp_data_meeting_threshold_CSF) %in% cluster_A_patients_overall)
+sum(row.names(proteomic_exp_data_meeting_threshold_CSF) %in% cluster_B_patients_overall)
+```
+
+
+
+### The following code blocks examine and transform the urine proteomic data using the log function
+
+```{r}
+# checks for outliers in the urine measurements meeting the threshold
+hist(proteomic_exp_data_meeting_threshold_urine[[1]])
+hist(proteomic_exp_data_meeting_threshold_urine[[2]])
+hist(proteomic_exp_data_meeting_threshold_urine[[3]])
+hist(proteomic_exp_data_meeting_threshold_urine[[4]])
+hist(proteomic_exp_data_meeting_threshold_urine[[5]])
+```
+
+```{r}
+# checks for outliers in the CSF measurements meeting the threshold
+hist(proteomic_exp_data_meeting_threshold_CSF[[1]])
+hist(proteomic_exp_data_meeting_threshold_CSF[[2]])
+hist(proteomic_exp_data_meeting_threshold_CSF[[3]])
+hist(proteomic_exp_data_meeting_threshold_CSF[[4]])
+hist(proteomic_exp_data_meeting_threshold_CSF[[5]])
+```
+
+```{r}
+# normalizes the expression matrix with log transformation and scales it
+proteomic_exp_data_meeting_threshold_urine <- scale(as.data.frame(apply(proteomic_exp_data_meeting_threshold_urine, 2, log)))
+
+# gets fraction of missingness and imputes missing values with scaled mean of 0
+mean(is.na(proteomic_exp_data_meeting_threshold_urine))
+proteomic_exp_data_meeting_threshold_urine[is.na(proteomic_exp_data_meeting_threshold_urine)] <- 0
+```
+
+
+```{r}
+# CSF data is already normalized. This code scales each feature to have a mean of 0 and SD of 1
+proteomic_exp_data_meeting_threshold_CSF_processed <- scale(as.data.frame(proteomic_exp_data_meeting_threshold_CSF))
+
+# gets fraction of missingness and imputes missing values with scaled mean of 0
+mean(is.na(proteomic_exp_data_meeting_threshold_CSF_processed))
+proteomic_exp_data_meeting_threshold_CSF_processed[is.na(proteomic_exp_data_meeting_threshold_CSF_processed)] <- 0
+```
+
+
+```{r}
+# checks for rough normal distribution in the processed urine measurements meeting the threshold
+hist(proteomic_exp_data_meeting_threshold_urine[,1], main = "Urine Proteomic Normality Test 1")
+hist(proteomic_exp_data_meeting_threshold_urine[,2], main = "Urine Proteomic Normality Test 2")
+hist(proteomic_exp_data_meeting_threshold_urine[,3], main = "Urine Proteomic Normality Test 3")
+hist(proteomic_exp_data_meeting_threshold_urine[,4], main = "Urine Proteomic Normality Test 4")
+hist(proteomic_exp_data_meeting_threshold_urine[,5], main = "Urine Proteomic Normality Test 5")
+```
+
+```{r}
+# checks for rough normal distribution in the processed CSF measurements meeting the threshold
+hist(proteomic_exp_data_meeting_threshold_CSF_processed[,1], main = "CSF Proteomic Normality Test 1")
+hist(proteomic_exp_data_meeting_threshold_CSF_processed[,2], main = "CSF Proteomic Normality Test 2")
+hist(proteomic_exp_data_meeting_threshold_CSF_processed[,3], main = "CSF Proteomic Normality Test 3")
+hist(proteomic_exp_data_meeting_threshold_CSF_processed[,4], main = "CSF Proteomic Normality Test 4")
+hist(proteomic_exp_data_meeting_threshold_CSF_processed[,5], main = "CSF Proteomic Normality Test 5")
+```
+
+```{r}
+# writes a list of the selected proteomic features to export for cluster creation
+writeLines(paste(colnames(proteomic_exp_data_meeting_threshold_urine), collapse = "\n"), file.path(main_directory, "selected_proteomic_features_urine_from_UPDRS_A_vs_B.txt"))
+```
+
+
+```{r}
+# writes a list of the selected CSF proteomic features to export for cluster creation
+writeLines(paste(colnames(proteomic_exp_data_meeting_threshold_CSF_processed), collapse = "\n"), file.path(main_directory, "selected_proteomic_features_CSF_from_UPDRS_A_vs_B.txt"))
+```
+
+
+

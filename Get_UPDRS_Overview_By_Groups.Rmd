@@ -1,0 +1,242 @@
+---
+title: "Get UPDRS Overview By Groups"
+author: "Andrew Gumbert"
+date: "September 2025 - April 2026"
+output: html_document
+---
+
+Description:
+
+This file defines a function that generates line plots and statistical comparison results from UPDRS data corresponding to two distinct groups of patients. Both UPDRS raw scores and UPDRS changes from baseline are plotted and compared by group at years 0, 1, 2, and 3. The function takes two vectors of patient IDs corresponding to the two groups as input. Two additional parameters are optional and can specify the respective names of each group as strings. This function is used to generate plots and statistical comparisons in other files in this repository.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+#### Loads the curated metadata from PPMI 
+
+```{r}
+library(readxl)
+```
+
+
+```{r}
+main_directory <- "/Users/Andrew/Desktop/PPMI_Data_Files"
+```
+
+```{r}
+# Reads in the curated data set containing LEDD information
+# Credit to https://stackoverflow.com/questions/7049272/importing-excel-files-into-r-xlsx-or-xls
+# for help with this code
+curated_data <- read_excel(file.path(main_directory, "PPMI_Curated_Data_Cut_Public_20251112.xlsx"), sheet = 1)
+```
+
+
+
+#### This code block defines a function used throughout other files that provides a UPDRS longitudinal summary and comparison across two groups, both in terms of raw scores and changes from baseline.
+
+```{r, warning = FALSE}
+
+# Parameters: 
+# group_1: list of patient IDs corresponding to the first group to compare
+# group_2: list of patient IDs corresponding to the second group to compare
+# group_1_name: (optional) name of the first group that will appear in tables and plots
+# group_2_name: (optional) name of the second group that will appear in tables and plots
+# Returns nothing but will print tables and line graphs showing a summary of the data and
+# statistical comparisons at each time point and within each UPDRS section. The function
+# considers and tests both UPDRS raw scores and changes from baseline. 
+get_UPDRS_overview_by_groups <- function(group_1, group_2, group_1_name = "group 1", group_2_name = "group 2"){
+  
+  
+##### GETS OVERVIEW OF LONGITUDINAL UPDRS RAW SCORE DATA #####
+
+UPDRS_scores_with_grouping <- (curated_data %>% dplyr::filter(PATNO %in% c(group_1, group_2) & YEAR >= 0 & YEAR <= 3)) %>% dplyr::select(PATNO, YEAR, updrs_totscore, updrs1_score, updrs2_score, updrs3_score) %>% mutate(grouping = case_when(PATNO %in% group_1 ~ group_1_name, PATNO %in% group_2 ~ group_2_name)) 
+
+# formats the labels for each year
+UPDRS_scores_with_grouping$YEAR <- paste0("Y", UPDRS_scores_with_grouping$YEAR)
+
+# creates function to get summary mean and sd values of each updrs section from a cluster
+# credit to https://www.statology.org/percentiles-in-r/
+# for help with the quartiles function
+
+get_grouping_longitudinal_UPDRS_summary <- function(group, quartile){
+  
+    UPDRS_summary_df <- data.frame(totscore = c(0, 0, 0, 0))
+    
+    UPDRS_summary_df$totscore <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){quantile((UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group))$updrs_totscore, probs = quartile, na.rm = T)})
+
+    UPDRS_summary_df$score1 <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){quantile((UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group))$updrs1_score, probs = quartile, na.rm = T)})
+
+    UPDRS_summary_df$score2 <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){quantile((UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group))$updrs2_score, probs = quartile, na.rm = T)})
+
+    UPDRS_summary_df$score3 <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){quantile((UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group))$updrs3_score, probs = quartile, na.rm = T)})
+    
+    colnames(UPDRS_summary_df) <- paste0(colnames(UPDRS_summary_df), "_", quartile)
+    
+    return (UPDRS_summary_df)
+
+}
+
+# calls the function defined above to get data frame of summary statistics
+
+UPDRS_scores_with_group_1_summary <- cbind(data.frame(YEAR = c("Y0", "Y1", "Y2", "Y3")), grouping = rep(group_1_name, 4), get_grouping_longitudinal_UPDRS_summary(group_1_name, 0.25), get_grouping_longitudinal_UPDRS_summary(group_1_name, 0.5), get_grouping_longitudinal_UPDRS_summary(group_1_name, 0.75))
+
+UPDRS_scores_with_group_2_summary <- cbind(data.frame(YEAR = c("Y0", "Y1", "Y2", "Y3")), grouping = rep(group_2_name, 4), get_grouping_longitudinal_UPDRS_summary(group_2_name, 0.25), get_grouping_longitudinal_UPDRS_summary(group_2_name, 0.5), get_grouping_longitudinal_UPDRS_summary(group_2_name, 0.75))
+
+UPDRS_scores_with_group_summary <- rbind(UPDRS_scores_with_group_1_summary, UPDRS_scores_with_group_2_summary)
+
+print(UPDRS_scores_with_group_summary)
+
+# Credit to https://www.sthda.com/english/wiki/ggplot2-error-bars-quick-start-guide-r-software-and-data-visualization
+# for help with setting up sd error bars 
+
+# Creates line plots of summary data and wilcox p-value results for each comparison
+
+print(ggplot(UPDRS_scores_with_group_summary, aes(x = YEAR, y = totscore_0.5, group = grouping, color = grouping)) + geom_line(lwd = 2) + geom_errorbar(aes(ymin = totscore_0.25, ymax = totscore_0.75)) + labs(y = "UPDRS Raw Total Score"))
+
+print(ggplot(UPDRS_scores_with_group_summary, aes(x = YEAR, y = score1_0.5, group = grouping, color = grouping)) + geom_line(lwd = 2) + geom_errorbar(aes(ymin = score1_0.25, ymax = score1_0.75)) + labs(y = "UPDRS Section 1 Raw Score"))
+
+print(ggplot(UPDRS_scores_with_group_summary, aes(x = YEAR, y = score2_0.5, group = grouping, color = grouping)) + geom_line(lwd = 2) + geom_errorbar(aes(ymin = score2_0.25, ymax = score2_0.75)) + labs(y = "UPDRS Section 2 Raw Score"))
+
+print(ggplot(UPDRS_scores_with_group_summary, aes(x = YEAR, y = score3_0.5, group = grouping, color = grouping)) + geom_line(lwd = 2) + geom_errorbar(aes(ymin = score3_0.25, ymax = score3_0.75)) + labs(y = "UPDRS Section 3 Raw Score"))
+
+
+# creates and prints a data frame with p-values for each UPDRS section 
+print("")
+
+print("Raw UPDRS Score p-value Results:")
+
+tot_score_pvals <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){wilcox.test((UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group_1_name))$updrs_totscore, (UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group_2_name))$updrs_totscore)$p.value})
+
+section_1_pvals <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){wilcox.test((UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group_1_name))$updrs1_score, (UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group_2_name))$updrs1_score)$p.value})
+
+section_2_pvals <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){wilcox.test((UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group_1_name))$updrs2_score, (UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group_2_name))$updrs2_score)$p.value})
+
+section_3_pvals <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){wilcox.test((UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group_1_name))$updrs3_score, (UPDRS_scores_with_grouping %>% dplyr::filter(YEAR == year, grouping == group_2_name))$updrs3_score)$p.value})
+
+print(data.frame(Total_Score_pvals = tot_score_pvals, Section_1_pvals = section_1_pvals, Section_2_pvals = section_2_pvals, Section_3_pvals = section_3_pvals))
+
+
+##### ACQUIRES UPDRS PROGRESSION DATA #####
+
+
+# gets the UPDRS totscores by year in a wide data frame
+UPDRS_tot_changes <- UPDRS_scores_with_grouping %>% pivot_wider(id_cols = PATNO, names_from = YEAR, values_from = updrs_totscore) %>% mutate(grouping = case_when(PATNO %in% group_1 ~ group_1_name, PATNO %in% group_2 ~ group_2_name))
+
+# this code block changes the updrs raw scores to the difference from baseline
+UPDRS_tot_changes$Y1 <- UPDRS_tot_changes$Y1 - UPDRS_tot_changes$Y0
+UPDRS_tot_changes$Y2 <- UPDRS_tot_changes$Y2 - UPDRS_tot_changes$Y0
+UPDRS_tot_changes$Y3 <- UPDRS_tot_changes$Y3 - UPDRS_tot_changes$Y0
+UPDRS_tot_changes$Y0 <- 0
+
+UPDRS_tot_changes <- UPDRS_tot_changes %>% pivot_longer(cols = c("Y0", "Y1", "Y2", "Y3"), names_to = "YEAR", values_to = "updrs_tot_change")
+
+# gets the UPDRS section 1 scores by year in a wide data frame
+UPDRS1_changes <- UPDRS_scores_with_grouping %>% pivot_wider(id_cols = PATNO, names_from = YEAR, values_from = updrs1_score) %>% mutate(grouping = case_when(PATNO %in% group_1 ~ group_1_name, PATNO %in% group_2 ~ group_2_name))
+
+# this code block changes the updrs raw scores to the difference from baseline
+UPDRS1_changes$Y1 <- UPDRS1_changes$Y1 - UPDRS1_changes$Y0
+UPDRS1_changes$Y2 <- UPDRS1_changes$Y2 - UPDRS1_changes$Y0
+UPDRS1_changes$Y3 <- UPDRS1_changes$Y3 - UPDRS1_changes$Y0
+UPDRS1_changes$Y0 <- 0
+
+UPDRS1_changes <- UPDRS1_changes %>% pivot_longer(cols = c("Y0", "Y1", "Y2", "Y3"), names_to = "YEAR", values_to = "updrs1_change")
+
+# gets the UPDRS section 2 scores by year in a wide data frame
+UPDRS2_changes <- UPDRS_scores_with_grouping %>% pivot_wider(id_cols = PATNO, names_from = YEAR, values_from = updrs2_score) %>% mutate(grouping = case_when(PATNO %in% group_1 ~ group_1_name, PATNO %in% group_2 ~ group_2_name))
+
+# this code block changes the updrs raw scores to the difference from baseline
+UPDRS2_changes$Y1 <- UPDRS2_changes$Y1 - UPDRS2_changes$Y0
+UPDRS2_changes$Y2 <- UPDRS2_changes$Y2 - UPDRS2_changes$Y0
+UPDRS2_changes$Y3 <- UPDRS2_changes$Y3 - UPDRS2_changes$Y0
+UPDRS2_changes$Y0 <- 0
+
+UPDRS2_changes <- UPDRS2_changes %>% pivot_longer(cols = c("Y0", "Y1", "Y2", "Y3"), names_to = "YEAR", values_to = "updrs2_change")
+
+# gets the UPDRS section 3 scores by year in a wide data frame
+UPDRS3_changes <- UPDRS_scores_with_grouping %>% pivot_wider(id_cols = PATNO, names_from = YEAR, values_from = updrs3_score) %>% mutate(grouping = case_when(PATNO %in% group_1 ~ group_1_name, PATNO %in% group_2 ~ group_2_name))
+
+# this code block changes the updrs raw scores to the difference from baseline
+UPDRS3_changes$Y1 <- UPDRS3_changes$Y1 - UPDRS3_changes$Y0
+UPDRS3_changes$Y2 <- UPDRS3_changes$Y2 - UPDRS3_changes$Y0
+UPDRS3_changes$Y3 <- UPDRS3_changes$Y3 - UPDRS3_changes$Y0
+UPDRS3_changes$Y0 <- 0
+
+UPDRS3_changes <- UPDRS3_changes %>% pivot_longer(cols = c("Y0", "Y1", "Y2", "Y3"), names_to = "YEAR", values_to = "updrs3_change")
+
+
+##### GETS OVERVIEW OF LONGITUDINAL UPDRS PROGRESSION DATA #####
+
+# creates function to get summary mean and sd values of each updrs section from a cluster (change from baseline)
+# credit to https://www.statology.org/percentiles-in-r/
+# for help with the quartiles function
+
+get_grouping_longitudinal_UPDRS_change_summary <- function(group, quartile){
+  
+    UPDRS_summary_df <- data.frame(totscore = c(0, 0, 0, 0))
+    
+    UPDRS_summary_df$totscore <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){quantile((UPDRS_tot_changes %>% dplyr::filter(YEAR == year, grouping == group))$updrs_tot_change, probs = quartile, na.rm = T)})
+
+    UPDRS_summary_df$score1 <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){quantile((UPDRS1_changes %>% dplyr::filter(YEAR == year, grouping == group))$updrs1_change, probs = quartile, na.rm = T)})
+
+    UPDRS_summary_df$score2 <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){quantile((UPDRS2_changes %>% dplyr::filter(YEAR == year, grouping == group))$updrs2_change, probs = quartile, na.rm = T)})
+
+    UPDRS_summary_df$score3 <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){quantile((UPDRS3_changes %>% dplyr::filter(YEAR == year, grouping == group))$updrs3_change, probs = quartile, na.rm = T)})
+    
+    colnames(UPDRS_summary_df) <- paste0(colnames(UPDRS_summary_df), "_", quartile)
+    
+    return (UPDRS_summary_df)
+
+}
+
+# calls the function defined above to get data frame of summary statistics
+
+UPDRS_scores_with_group_1_changes_summary <- cbind(data.frame(YEAR = c("Y0", "Y1", "Y2", "Y3")), grouping = rep(group_1_name, 4), get_grouping_longitudinal_UPDRS_change_summary(group_1_name, 0.25), get_grouping_longitudinal_UPDRS_change_summary(group_1_name, 0.5), get_grouping_longitudinal_UPDRS_change_summary(group_1_name, 0.75))
+
+UPDRS_scores_with_group_2_changes_summary <- cbind(data.frame(YEAR = c("Y0", "Y1", "Y2", "Y3")), grouping = rep(group_2_name, 4), get_grouping_longitudinal_UPDRS_change_summary(group_2_name, 0.25), get_grouping_longitudinal_UPDRS_change_summary(group_2_name, 0.5), get_grouping_longitudinal_UPDRS_change_summary(group_2_name, 0.75))
+
+UPDRS_scores_with_group_changes_summary <- rbind(UPDRS_scores_with_group_1_changes_summary, UPDRS_scores_with_group_2_changes_summary)
+
+print(UPDRS_scores_with_group_changes_summary)
+
+# Credit to https://www.sthda.com/english/wiki/ggplot2-error-bars-quick-start-guide-r-software-and-data-visualization
+# for help with setting up sd error bars 
+
+# Creates line plots of summary data and wilcox p-value results for each comparison
+
+print(ggplot(UPDRS_scores_with_group_changes_summary, aes(x = YEAR, y = totscore_0.5, group = grouping, color = grouping)) + geom_line(lwd = 2) + geom_errorbar(aes(ymin = totscore_0.25, ymax = totscore_0.75)) + labs(y = "UPDRS Total Score Change"))
+
+print(ggplot(UPDRS_scores_with_group_changes_summary, aes(x = YEAR, y = score1_0.5, group = grouping, color = grouping)) + geom_line(lwd = 2) + geom_errorbar(aes(ymin = score1_0.25, ymax = score1_0.75)) + labs(y = "UPDRS Section 1 Score Change"))
+
+print(ggplot(UPDRS_scores_with_group_changes_summary, aes(x = YEAR, y = score2_0.5, group = grouping, color = grouping)) + geom_line(lwd = 2) + geom_errorbar(aes(ymin = score2_0.25, ymax = score2_0.75)) + labs(y = "UPDRS Section 2 Score Change"))
+
+print(ggplot(UPDRS_scores_with_group_changes_summary, aes(x = YEAR, y = score3_0.5, group = grouping, color = grouping)) + geom_line(lwd = 2) + geom_errorbar(aes(ymin = score3_0.25, ymax = score3_0.75)) + labs(y = "UPDRS Section 3 Score Change"))
+
+
+# creates and prints a data frame with p-values for the differences in UPDRS section scores by grouping
+
+print("")
+
+print("UPDRS Progression p-value Results (Change from Baseline):")
+
+
+tot_score_change_pvals <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){wilcox.test((UPDRS_tot_changes %>% dplyr::filter(YEAR == year, grouping == group_1_name))$updrs_tot_change, (UPDRS_tot_changes %>% dplyr::filter(YEAR == year, grouping == group_2_name))$updrs_tot_change)$p.value})
+
+section_1_change_pvals <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){wilcox.test((UPDRS1_changes %>% dplyr::filter(YEAR == year, grouping == group_1_name))$updrs1_change, (UPDRS1_changes %>% dplyr::filter(YEAR == year, grouping == group_2_name))$updrs1_change)$p.value})
+
+section_2_change_pvals <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){wilcox.test((UPDRS2_changes %>% dplyr::filter(YEAR == year, grouping == group_1_name))$updrs2_change, (UPDRS2_changes %>% dplyr::filter(YEAR == year, grouping == group_2_name))$updrs2_change)$p.value})
+
+section_3_change_pvals <- sapply(c("Y0", "Y1", "Y2", "Y3") , function(year){wilcox.test((UPDRS3_changes %>% dplyr::filter(YEAR == year, grouping == group_1_name))$updrs3_change, (UPDRS3_changes %>% dplyr::filter(YEAR == year, grouping == group_2_name))$updrs3_change)$p.value})
+
+print(data.frame(Total_Score_change_pvals = tot_score_change_pvals, Section_1_change_pvals = section_1_change_pvals, Section_2_change_pvals = section_2_change_pvals, Section_3_change_pvals = section_3_change_pvals))
+
+
+}
+```

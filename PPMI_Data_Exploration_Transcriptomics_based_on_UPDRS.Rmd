@@ -1,0 +1,323 @@
+---
+title: "PPMI Transcriptomic Data Exploration based on UPDRS"
+author: "Andrew Gumbert"
+date: "September 2025 - April 2026"
+output: html_document
+---
+
+Description:
+
+This file uses the UPDRS-based clusters created in PPMI_UPDRS_Cluster_Creation.Rmd. The file also uses the PPMI transcriptomic data. The transcriptomic data is derived from Illumina technology applied to whole blood samples. The file performs differential expression analysis with DESeq2 to identify differentially expressed genes by UPDRS-based cluster. The resulting differentially expressed features are saved in text files with and without the decimal value that specifies the version number, enabling further analyses in other files. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library("tidyverse")
+library("ggplot2")
+library("DESeq2")
+library("gprofiler2")
+```
+
+
+```{r}
+main_directory <- "/Users/Andrew/Desktop/PPMI_Data_Files"
+```
+
+#### The following code loads the metadata files and processes them to produce a cleaned data frame of the combined metadata.
+
+```{r}
+
+# Takes in the metadata files for RNAseq and sample metadata
+# This file is from https://ida.loni.usc.edu/pages/access/geneticData.jsp
+RNAseq_metadata <- read.csv(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/metaDataIR3.csv"))
+# This file is from https://ida.loni.usc.edu/web/ppmi-rnaseq-app#Accessdata
+sample_metadata <- read.csv(file.path(main_directory, "meta_data.11192021.csv"))
+
+# Checks dimensions and the number of unique samples in the metadata (should be the same)
+dim(RNAseq_metadata)
+length(unique(RNAseq_metadata$HudAlphaID))
+dim(sample_metadata)
+length(unique(sample_metadata$HudAlphaSampleName))
+
+# joins the two metadata files and removes old files
+RNAseq_metadata <- dplyr::rename(RNAseq_metadata, HudAlphaSampleName = "HudAlphaID")
+joined_metadata <- inner_join(RNAseq_metadata, sample_metadata, by = "HudAlphaSampleName")
+rm(RNAseq_metadata, sample_metadata)
+
+# checks the dimensions of joined metadata compared to unique samples (should be the same)
+dim(joined_metadata)
+length(unique(joined_metadata$HudAlphaSampleName))
+
+# stores the metadata filtered to only include samples that passed quality control
+quality_metadata <- joined_metadata %>% dplyr::filter(QCflagIR3 == "pass")
+
+
+dim(quality_metadata)
+
+# joins genomic data to the RNAseq data in case downstream analyses consider the genomic data
+genetic_metadata <- read.csv(file.path(main_directory, "iu_genetic_consensus_20250515_18Jul2025.csv"))
+genetic_metadata <- genetic_metadata %>% dplyr::rename("PATNO.x" = PATNO)
+overall_RNAseq_metadata <- left_join(quality_metadata, genetic_metadata, by = "PATNO.x")
+
+dim(overall_RNAseq_metadata)
+```
+```{r}
+length(cluster_A_patients_overall)
+length(cluster_B_patients_overall)
+
+cluster_A_patients_bl <- cluster_A_patients_overall
+cluster_B_patients_bl <- cluster_B_patients_overall
+
+# gets cluster A PATNOs meeting the threshold for RNA QC metrics
+quality_cluster_A_PATNOs <- (overall_RNAseq_metadata %>% dplyr::filter(PATNO.x %in% cluster_A_patients_overall & CLINICAL_EVENT == "BL" & RIN.Value.x >= 7 & multimapped_percent + uniquely_mapped_percent >= 80) %>% dplyr::arrange(PATNO.x))$PATNO.x
+
+# gets cluster B PATNOs meeting the threshold for RNA QC metrics
+quality_cluster_B_PATNOs <- (overall_RNAseq_metadata %>% dplyr::filter(PATNO.x %in% cluster_B_patients_overall & CLINICAL_EVENT == "BL" & RIN.Value.x >= 7 & multimapped_percent + uniquely_mapped_percent >= 80) %>% dplyr::arrange(PATNO.x))$PATNO.x
+
+length(quality_cluster_A_PATNOs)
+length(quality_cluster_B_PATNOs)
+```
+
+```{r}
+# OPTIONAL 
+# Sets the cluster A and B BL PATNOs to be only those that meet the 
+# threshold. These variables are used throughout downstream analyses.
+cluster_A_patients_bl <- quality_cluster_A_PATNOs
+cluster_B_patients_bl <- quality_cluster_B_PATNOs
+```
+
+
+
+## TRANSCRIPTOMIC ANALYSIS
+
+#### This code block creates the gene expression count matrix with the filtered PD samples from baseline.
+
+#### The code uses the cluster assignments from the "PPMI_UPDRS_Cluster_Creation.Rmd" file.
+
+```{r}
+# Gets just the relevant filtered sample IDs from baseline to use in setting up the counts matrix
+filtered_sample_ids_bl <- sapply(sort(c(cluster_A_patients_bl, cluster_B_patients_bl)), function(patient_id) {(overall_RNAseq_metadata %>% dplyr::filter(PATNO.x == patient_id & Month == "M0"))$HudAlphaSampleName})
+
+# Gets the label names for each gene from the first gene quanitification file
+# Credit to https://stackoverflow.com/questions/42819131/read-tab-delimited-text-file
+# for help with processing tab deliminations 
+gene_names <- read.table(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant/PPMI-Phase1-IR3.1009.POOL.0003202425.5104-SL-0095.longRNA-NEBKAP.salmon.genes.sf"), sep = "\t", header=T)$Name
+
+# creates data frame to store the expression matrix
+PD_expression_counts_bl <- data.frame(gene_names)
+
+# counter to help track progress of loop (see below)
+counter = 0
+
+# Fills the expression matrix with the data from each genomic file
+# Credit to https://stackoverflow.com/questions/14958516/read-all-files-in-directory-and-apply-multiple-functions-to-each-data-frame
+# for help with accessing all files in a directory
+# Credit to https://cran.r-project.org/web/packages/stringr/vignettes/regular-expressions.html
+# for help with regular expressions
+# Credit to https://www.dataquest.io/blog/add-column-to-dataframe-in-r/
+# for help with manipulating data frames
+# Credit to https://www.w3schools.com/r/r_for_loop.asp
+# for help with setting up the for loop
+gene_files <- list.files(path = file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant"), pattern = "*.genes.sf")
+for (x in gene_files){
+    # determines if the file corresponds to filtered PD samples
+    if(str_extract(x, "5104-SL-....") %in% filtered_sample_ids_bl){
+      
+        # adds the data from the file to the expression matrix.
+        PD_expression_counts_bl[str_extract(x, "5104-SL-....")] <- read.table(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant/", x), sep = "\t", header=T)$NumReads
+        
+        # keeps track of counter and prints at every 100 counts
+        counter <- counter + 1
+        if (counter %% 100 == 0){
+            print(counter)
+        }
+    }
+}
+
+# puts gene names as the row names
+PD_expression_counts_bl <- column_to_rownames(PD_expression_counts_bl, "gene_names")
+
+# sets the column names to be participant ids rather than sample ids
+colnames(PD_expression_counts_bl) <- sapply(colnames(PD_expression_counts_bl), function(sample_id){(overall_RNAseq_metadata %>% dplyr::filter(HudAlphaSampleName == sample_id))$PATNO.x})
+
+# orders the columns by ascending participant ids and rows by ascending Ensembl IDs
+# Credit to https://stackoverflow.com/questions/29873293/dplyr-order-columns-alphabetically-in-r
+# for help with this step
+PD_expression_counts_bl <- PD_expression_counts_bl %>% dplyr::select(order(colnames(.))) %>% dplyr::arrange(row.names(.))
+```
+
+
+
+
+```{r}
+# Prints the sample sizes of the transcriptomic data by longitudinal cluster
+
+# for longitudinal cluster A
+sum(colnames(PD_expression_counts_bl) %in% cluster_A_patients_overall)
+
+# for longitudinal cluster B
+sum(colnames(PD_expression_counts_bl) %in% cluster_B_patients_overall)
+```
+
+
+
+## DESEQ ANALYSIS TO IDENTIFY RELEVANT GENES
+
+#### This code block creates a DESeq object with the metadata and expression counts.
+
+```{r}
+
+# sets up metadata file with cluster assignments of each patient
+PD_DE_metadata_bl <- data.frame(patient_id = colnames(PD_expression_counts_bl))
+PD_DE_metadata_bl$clust <- as.factor(sapply(PD_DE_metadata_bl$patient_id, function(id){if(id %in% cluster_A_patients_bl){return("A")}
+                                                                                       if(id %in% cluster_B_patients_bl){return("B")}}))
+PD_DE_metadata_bl <- column_to_rownames(PD_DE_metadata_bl, "patient_id")
+
+# Checks that rownames in metadata match column names in counts matrix
+# Credit to https://www.youtube.com/watch?v=OzNzO8qwwp0
+# for help with this step
+all(colnames(PD_expression_counts_bl) == rownames(PD_DE_metadata_bl))
+
+
+# Creates DESeq object with exp counts and metadata, based on the cluster assignment from kml.
+# Credit to https://www.youtube.com/watch?v=OzNzO8qwwp0
+# for help with this step
+# Credit to https://support.bioconductor.org/p/133326/
+# for help with debugging
+PD_DES_obj_bl <- DESeqDataSetFromMatrix(countData = round(PD_expression_counts_bl),
+                                        colData = PD_DE_metadata_bl,
+                                        design = ~ clust)
+```
+
+
+```{r}
+# filters out genes that have all zero expression values
+# credit to https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+# for help with this code
+nonzero_rows_bl <- rowSums(counts(PD_DES_obj_bl)) > 0
+PD_DES_obj_bl <- PD_DES_obj_bl[nonzero_rows_bl,]
+```
+
+
+
+
+
+
+
+
+#### The following code blocks run differential expression analysis and compute the results
+
+```{r}
+# runs DESeq on the object and stores the results
+# credit to https://www.youtube.com/watch?v=OzNzO8qwwp0
+# for help with these steps
+
+PD_DES_obj_bl <- DESeq(PD_DES_obj_bl)
+DESeq_results_bl <- results(PD_DES_obj_bl)
+```
+
+#### The following code blocks explore the DE results from baseline
+
+```{r}
+# defines a function to get a summary of DE results from a DESeq results object
+create_DE_results_summary <- function(DE_results){
+    return(data.frame(gene_id = row.names(DE_results), log2fc = DE_results$log2FoldChange, pval = DE_results$pvalue,
+           padj = DE_results$padj, nlog10_pval = -log10(DE_results$pvalue), up_reg = DE_results$log2FoldChange > 0,
+           is_sig = (DE_results$pvalue < 0.01 & !is.na(DE_results$pvalue))))
+}
+```
+
+
+```{r}
+
+# Creates a data frame to store the summary of results including significance
+DE_results_summary_bl <- create_DE_results_summary(DESeq_results_bl)
+
+sum(DE_results_summary_bl$is_sig)
+mean(DE_results_summary_bl$is_sig)
+
+
+```
+
+```{r}
+# Creates volcano plot of differential expression analysis results
+# Credit to https://biostatsquid.com/volcano-plots-r-tutorial/
+# for help with this step.
+ggplot(DE_results_summary_bl, aes(x = log2fc, y = nlog10_pval, col = is_sig, label = gene_id)) + geom_point(size = 1)
+
+# creates histogram to visualize distribution of p-values
+hist(DE_results_summary_bl$pval)
+```
+
+
+
+
+
+
+#### Selects transcriptomic features meeting p < 0.01 significance threshold for downstream analyses and molecular cluster creation
+
+```{r}
+# subsets data to selected features and sorts the rows
+# credit to https://hbctraining.github.io/DGE_workshop/lessons/02_DGE_count_normalization.html
+# for help with this code.
+transcriptomic_exp_data_meeting_threshold_before_vst <- as.data.frame(counts(PD_DES_obj_bl, normalized = FALSE)[DE_results_summary_bl[DE_results_summary_bl$pval < 0.01,]$gene_id,]) %>% arrange(row.names(.))
+```
+
+
+```{r}
+# Uses a variance stabilizing transformation on the RNA seq data.
+# Credit to https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+# and https://www.rdocumentation.org/packages/DESeq2/versions/1.12.3/topics/vst
+# and https://rpubs.com/shilpayadahalli/1018298
+# for help with this code.
+transcriptomic_data_DES_obj_for_vst <- DESeqDataSetFromMatrix(countData = round(transcriptomic_exp_data_meeting_threshold_before_vst),
+                                                                            colData = (data.frame(patno = colnames(transcriptomic_exp_data_meeting_threshold_before_vst)) %>% column_to_rownames("patno")), 
+                                                                            design = ~ 1)
+                                                                      
+vst_transcriptomic_data <- varianceStabilizingTransformation(transcriptomic_data_DES_obj_for_vst)
+
+# extracts the processed transcriptomic exp data meeting the threshold and scales it for downstream analyses
+transcriptomic_exp_data_meeting_threshold <- scale(t(as.data.frame(assay(vst_transcriptomic_data))))
+```
+
+
+```{r}
+# prints the dimensions of the processed transcriptomic data frame
+dim(transcriptomic_exp_data_meeting_threshold)
+```
+
+```{r}
+# checks processed data for normality
+hist(as.data.frame(transcriptomic_exp_data_meeting_threshold)[[1]])
+hist(as.data.frame(transcriptomic_exp_data_meeting_threshold)[[2]])
+hist(as.data.frame(transcriptomic_exp_data_meeting_threshold)[[3]])
+hist(as.data.frame(transcriptomic_exp_data_meeting_threshold)[[4]])
+hist(as.data.frame(transcriptomic_exp_data_meeting_threshold)[[5]])
+```
+
+```{r}
+# writes a list of the selected transcriptomic features to export with the decimal
+writeLines(paste(colnames(transcriptomic_exp_data_meeting_threshold), collapse = "\n"), file.path(main_directory, "selected_transcriptomic_features_from_UPDRS_A_vs_B.txt"))
+```
+
+
+```{r}
+# writes a list of the selected transcriptomic features to export for generalizability tests
+writeLines(paste0("'", paste(colnames(transcriptomic_exp_data_meeting_threshold), collapse = "', '")), file.path(main_directory, "selected_transcriptomic_features_from_UPDRS_A_vs_B_comma_separated.txt"), "'")
+```
+
+
+```{r}
+# writes a list of the selected transcriptomic features to export for gene set analysis
+writeLines(paste(sapply(colnames(transcriptomic_exp_data_meeting_threshold), function(x) {substr(x, 1, 15)}), collapse = "\n"), file.path(main_directory, "selected_transcriptomic_features_from_UPDRS_A_vs_B_no_version.txt"))
+```
+
+

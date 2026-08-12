@@ -1,0 +1,1847 @@
+---
+title: "PPMI Molecular Cluster Creation with UPDRS-based Features"
+author: "Andrew Gumbert"
+date: "September 2025 - August 2026"
+output: html_document
+---
+
+Description:
+
+This file performs clustering analysis with the selected multi-omics features from PPMI_Data_Exploration_Transcriptomics_based_on_UPDRS.Rmd and PPMI_Data_Exploration_Proteomics_based_on_UPDRS.Rmd. The file considers the full cohort of sporadic cases, even those that did not have sufficient UPDRS data to qualify for a UPDRS-based cluster assignment. Accordingly, this program loads and processes the omics data directly from the raw files to capture all sporadic cases. With the clustering results, this file tests the clusters for clinical implications and differences with respect to covariates. 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(readxl)
+library(DESeq2)
+library(limma)
+library(iClusterPlus)
+library(ComplexHeatmap)
+library(ROCR)
+library(glmnet)
+library(rstatix)
+library(coin)
+library(lme4)
+library(lmerTest)
+library(data.table)
+library(MOFA2)
+library(tidyverse)
+```
+
+### Sets up global variables and the main curated data set
+
+```{r}
+main_directory <- "/Users/Andrew/Desktop/PPMI_Data_Files"
+```
+
+```{r}
+# sets global variable for the color scheme of the clusters
+cluster_colors = c("brown", "orange", "cornflowerblue")
+```
+
+
+```{r}
+# Sets boolean that will determine whether the analyses consider CSF proteomic data.
+# CSF data originates from a more invasive procedure (lumbar puncture) relative to
+# data from urine and whole blood. Therefore, setting this variable to FALSE will
+# only consider data from the minimally invasive tests without the reliance on the 
+# invasive lumbar puncture procedure. 
+consider_CSF_data <- TRUE
+```
+
+
+```{r}
+# Reads in the curated data set containing LEDD information
+# Credit to https://stackoverflow.com/questions/7049272/importing-excel-files-into-r-xlsx-or-xls
+# for help with this code
+curated_data <- read_excel(file.path(main_directory, "PPMI_Curated_Data_Cut_Public_20251112.xlsx"), sheet = 1)
+```
+
+```{r}
+# filters to the full sporadic PD cohort
+curated_data_full_sporadic_cohort <- curated_data %>% dplyr::filter(subgroup == "Sporadic PD" & EVENT_ID == "BL") 
+full_sporadic_cohort_PATNOs <- curated_data_full_sporadic_cohort$PATNO
+length(full_sporadic_cohort_PATNOs)
+length(unique(full_sporadic_cohort_PATNOs))
+```
+
+### The following code blocks extract and process the transcriptomic data associated with the full sporadic cohort
+
+```{r}
+
+# Takes in the metadata files for RNAseq and sample metadata
+# This file is from https://ida.loni.usc.edu/pages/access/geneticData.jsp
+RNAseq_metadata <- read.csv(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/metaDataIR3.csv"))
+# This file is from https://ida.loni.usc.edu/web/ppmi-rnaseq-app#Accessdata
+sample_metadata <- read.csv(file.path(main_directory, "meta_data.11192021.csv"))
+
+# Checks dimensions and the number of unique samples in the metadata (should be the same)
+dim(RNAseq_metadata)
+length(unique(RNAseq_metadata$HudAlphaID))
+dim(sample_metadata)
+length(unique(sample_metadata$HudAlphaSampleName))
+
+# joins the two metadata files and removes old files
+RNAseq_metadata <- dplyr::rename(RNAseq_metadata, HudAlphaSampleName = "HudAlphaID")
+joined_metadata <- inner_join(RNAseq_metadata, sample_metadata, by = "HudAlphaSampleName")
+rm(RNAseq_metadata, sample_metadata)
+
+# checks the dimensions of joined metadata compared to unique samples (should be the same)
+dim(joined_metadata)
+length(unique(joined_metadata$HudAlphaSampleName))
+
+# stores the metadata filtered to only include samples that passed quality control
+quality_metadata <- joined_metadata %>% dplyr::filter(QCflagIR3 == "pass")
+
+dim(quality_metadata)
+
+# joins genomic data to the RNAseq data in case downstream analyses consider the genomic data
+genetic_metadata <- read.csv(file.path(main_directory, "iu_genetic_consensus_20250515_18Jul2025.csv"))
+genetic_metadata <- genetic_metadata %>% dplyr::rename("PATNO.x" = PATNO )
+overall_RNAseq_metadata <- left_join(quality_metadata, genetic_metadata, by = "PATNO.x")
+
+dim(overall_RNAseq_metadata)
+```
+
+```{r}
+# filters to only PATNOs with RNA seq QC metrics meeting the threshold
+quality_RNA_full_sporadic_cohort_PATNOs <- (overall_RNAseq_metadata %>% dplyr::filter(PATNO.x %in% full_sporadic_cohort_PATNOs & CLINICAL_EVENT == "BL" & RIN.Value.x >= 7 & multimapped_percent + uniquely_mapped_percent >= 80) %>% dplyr::arrange(PATNO.x))$PATNO.x
+```
+
+
+```{r}
+# Gets just the relevant filtered sample IDs from baseline to use in setting up the counts matrix
+filtered_sample_ids_bl_full_sporadic_cohort <- sapply(sort(quality_RNA_full_sporadic_cohort_PATNOs), function(patient_id) {(overall_RNAseq_metadata %>% dplyr::filter(PATNO.x == patient_id & Month == "M0"))$HudAlphaSampleName})
+
+# Gets the label names for each gene from the first gene quanitification file
+# Credit to https://stackoverflow.com/questions/42819131/read-tab-delimited-text-file
+# for help with processing tab deliminations 
+gene_names <- read.table(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant/PPMI-Phase1-IR3.1009.POOL.0003202425.5104-SL-0095.longRNA-NEBKAP.salmon.genes.sf"), sep = "\t", header=T)$Name
+
+# creates data frame to store the expression matrix
+PD_expression_counts_bl_full_sporadic_cohort <- data.frame(gene_names)
+
+# counter to help track progress of loop (see below)
+counter = 0
+
+# Fills the expression matrix with the data from each genomic file
+# Credit to https://stackoverflow.com/questions/14958516/read-all-files-in-directory-and-apply-multiple-functions-to-each-data-frame
+# for help with accessing all files in a directory
+# Credit to https://cran.r-project.org/web/packages/stringr/vignettes/regular-expressions.html
+# for help with regular expressions
+# Credit to https://www.dataquest.io/blog/add-column-to-dataframe-in-r/
+# for help with manipulating data frames
+# Credit to https://www.w3schools.com/r/r_for_loop.asp
+# for help with setting up the for loop
+gene_files <- list.files(path = file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant"), pattern = "*.genes.sf")
+for (x in gene_files){
+    # determines if the file corresponds to filtered PD samples
+    if(str_extract(x, "5104-SL-....") %in% filtered_sample_ids_bl_full_sporadic_cohort){
+      
+        # adds the data from the file to the expression matrix.
+        PD_expression_counts_bl_full_sporadic_cohort[str_extract(x, "5104-SL-....")] <- read.table(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant/", x), sep = "\t", header=T)$NumReads
+        
+        # keeps track of counter and prints at every 100 counts
+        counter <- counter + 1
+        if (counter %% 100 == 0){
+            print(counter)
+        }
+    }
+}
+
+# puts gene names as the row names
+PD_expression_counts_bl_full_sporadic_cohort <- column_to_rownames(PD_expression_counts_bl_full_sporadic_cohort, "gene_names")
+
+# sets the column names to be patient ids rather than sample ids
+colnames(PD_expression_counts_bl_full_sporadic_cohort) <- sapply(colnames(PD_expression_counts_bl_full_sporadic_cohort), function(sample_id){(overall_RNAseq_metadata %>% dplyr::filter(HudAlphaSampleName == sample_id))$PATNO.x})
+
+# orders the columns by ascending patient id
+# Credit to https://stackoverflow.com/questions/29873293/dplyr-order-columns-alphabetically-in-r
+# for help with this step
+PD_expression_counts_bl_full_sporadic_cohort <- dplyr::select(PD_expression_counts_bl_full_sporadic_cohort, order(colnames(PD_expression_counts_bl_full_sporadic_cohort))) 
+```
+
+```{r}
+# loads the selected transcriptomic features from "PPMI_Data_Exploration_Transcriptomics_based_on_UPDRS.Rmd"
+selected_tran_features <- read.table(file.path(main_directory, "selected_transcriptomic_features_from_UPDRS_A_vs_B.txt"))$V1
+```
+
+
+
+```{r}
+# filters data to selected transcriptomics features from PPMI_Data_Exploration_Transcriptomics_based_on_UPDRS.Rmd and prepares for vst
+PD_expression_counts_bl_full_sporadic_cohort_before_vst <- PD_expression_counts_bl_full_sporadic_cohort %>% dplyr::filter(row.names(.) %in% selected_tran_features) %>% arrange(row.names(.))
+
+# checks the dimensions and head of the data frame
+dim(PD_expression_counts_bl_full_sporadic_cohort_before_vst)
+head(PD_expression_counts_bl_full_sporadic_cohort_before_vst)
+```
+
+
+```{r}
+# Uses a variance stabilizing transformation on the RNA seq data.
+# Credit to https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+# and https://www.rdocumentation.org/packages/DESeq2/versions/1.12.3/topics/vst
+# and https://rpubs.com/shilpayadahalli/1018298
+# for help with this code.
+transcriptomic_data_DES_obj_full_sporadic_cohort_for_vst <- DESeqDataSetFromMatrix(countData = round(PD_expression_counts_bl_full_sporadic_cohort_before_vst),
+                                                                            colData = (data.frame(patno = colnames(PD_expression_counts_bl_full_sporadic_cohort_before_vst)) %>% column_to_rownames("patno")), 
+                                                                            design = ~ 1)
+                                                                      
+vst_transcriptomic_data_full_sporadic_cohort <- varianceStabilizingTransformation(transcriptomic_data_DES_obj_full_sporadic_cohort_for_vst)
+
+# extracts the processed transcriptomic exp data meeting the threshold to use in downstream analyses
+transcriptomic_exp_data_meeting_threshold_full_sporadic_cohort <- t(as.data.frame(assay(vst_transcriptomic_data_full_sporadic_cohort)))
+```
+
+```{r}
+# prints the dimensions of the processed transcriptomic data frame
+dim(transcriptomic_exp_data_meeting_threshold_full_sporadic_cohort)
+```
+
+
+```{r}
+# scales the processed transcriptomic exp data to use in clustering
+transcriptomic_exp_for_clustering_full_sporadic_cohort <- scale(transcriptomic_exp_data_meeting_threshold_full_sporadic_cohort)
+```
+
+
+
+```{r}
+# checks processed data for normality
+hist(as.data.frame(transcriptomic_exp_for_clustering_full_sporadic_cohort)[[1]])
+hist(as.data.frame(transcriptomic_exp_for_clustering_full_sporadic_cohort)[[2]])
+hist(as.data.frame(transcriptomic_exp_for_clustering_full_sporadic_cohort)[[3]])
+hist(as.data.frame(transcriptomic_exp_for_clustering_full_sporadic_cohort)[[4]])
+hist(as.data.frame(transcriptomic_exp_for_clustering_full_sporadic_cohort)[[5]])
+```
+
+
+### The following code blocks extract and process the urine proteomic data associated with the full sporadic cohort
+
+
+```{r}
+# gets PPMI Urine proteomic data from the combined panels (PROJECT 190)
+proteomic_data_urine_project_190_full_sporadic_cohort <- rbind(read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_1_of_5_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_2_of_5_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_3_of_5_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_4_of_5_23Sep2025.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Targeted___untargeted_MS-based_proteomics_of_urine_in_PD_5_of_5_23Sep2025.csv")))
+
+length(unique(proteomic_data_urine_project_190_full_sporadic_cohort$PATNO))
+
+
+# filters to the full sporadic PD cohort
+proteomic_data_urine_project_190_full_sporadic_cohort <- proteomic_data_urine_project_190_full_sporadic_cohort %>% dplyr::filter(PATNO %in% full_sporadic_cohort_PATNOs & CLINICAL_EVENT == "BL")
+
+# gets number of patients in the proteomic dataset from the full sporadic cohort
+length(unique(proteomic_data_urine_project_190_full_sporadic_cohort$PATNO))
+
+```
+
+```{r}
+# loads the selected urine proteomic features from "PPMI_Data_Exploration_Proteomics_based_on_UPDRS.Rmd"
+selected_urine_prot_features <- read.table(file.path(main_directory, "selected_proteomic_features_urine_from_UPDRS_A_vs_B.txt"))$V1
+```
+
+
+```{r}
+# filters the urine proteomic data to the selected features from PPMI_Data_Exploration_Proteomics_based_on_UPDRS.Rmd
+# and pivots the table into an expression matrix
+proteomic_exp_data_meeting_threshold_urine_full_sporadic_cohort <- proteomic_data_urine_project_190_full_sporadic_cohort %>% dplyr::filter(CLINICAL_EVENT == "BL") %>% dplyr::select(PATNO, TESTNAME, TESTVALUE) %>% dplyr::filter(TESTNAME %in% selected_urine_prot_features) %>% pivot_wider(id_cols = "PATNO", values_from = "TESTVALUE", names_from = "TESTNAME") %>% arrange(PATNO) %>% column_to_rownames("PATNO")
+```
+
+
+```{r}
+# checks the head and dimensions of the resulting dataframe
+head(proteomic_exp_data_meeting_threshold_urine_full_sporadic_cohort)
+dim(proteomic_exp_data_meeting_threshold_urine_full_sporadic_cohort)
+```
+
+
+```{r}
+# applies log transform to normalize the data
+proteomic_exp_data_meeting_threshold_urine_full_sporadic_cohort <- as.data.frame(apply(proteomic_exp_data_meeting_threshold_urine_full_sporadic_cohort, 2, log))
+
+# scales the proteomic data to prepare for clustering
+proteomic_exp_for_clustering_urine_full_sporadic_cohort <- scale(proteomic_exp_data_meeting_threshold_urine_full_sporadic_cohort)
+```
+
+
+
+
+```{r}
+# performs imputation on missing values, replacing na values with the scaled mean of 0.
+# also prints the fraction of missing values
+# credit to https://stackoverflow.com/questions/8161836/how-do-i-replace-na-values-with-zeros-in-an-r-dataframe
+# for help with this technique
+sum(is.na(proteomic_exp_for_clustering_urine_full_sporadic_cohort)) / (nrow(proteomic_exp_for_clustering_urine_full_sporadic_cohort) * ncol(proteomic_exp_for_clustering_urine_full_sporadic_cohort))
+proteomic_exp_for_clustering_urine_full_sporadic_cohort[is.na(proteomic_exp_for_clustering_urine_full_sporadic_cohort)] <- 0
+```
+
+```{r}
+# checks for outliers and normality in the urine measurements meeting the threshold
+hist(proteomic_exp_for_clustering_urine_full_sporadic_cohort[,1], main = "Urine Proteomic Normality Test 1")
+hist(proteomic_exp_for_clustering_urine_full_sporadic_cohort[,2], main = "Urine Proteomic Normality Test 2")
+hist(proteomic_exp_for_clustering_urine_full_sporadic_cohort[,3], main = "Urine Proteomic Normality Test 3")
+hist(proteomic_exp_for_clustering_urine_full_sporadic_cohort[,4], main = "Urine Proteomic Normality Test 4")
+hist(proteomic_exp_for_clustering_urine_full_sporadic_cohort[,5], main = "Urine Proteomic Normality Test 5")
+```
+
+
+
+### The following code blocks extract and process the CSF proteomic data associated with the full sporadic cohort
+
+
+```{r}
+# gets PPMI CSF proteomic data from the combined panels (PROJECT 151)
+proteomic_data_CSF_project_151_full_sporadic_cohort <- rbind(read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_1_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_2_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_3_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_4_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_5_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_6_of_7_Batch_Corrected__15Feb2026.csv")), read.csv(file.path(main_directory, "Proteomic_Analysis/Project_151_pQTL_in_CSF_7_of_7_Batch_Corrected__15Feb2026.csv")))
+
+length(unique(proteomic_data_CSF_project_151_full_sporadic_cohort$PATNO))
+
+
+# filters to the full sporadic PD cohort
+proteomic_data_CSF_project_151_full_sporadic_cohort <- proteomic_data_CSF_project_151_full_sporadic_cohort %>% dplyr::filter(PATNO %in% full_sporadic_cohort_PATNOs & CLINICAL_EVENT == "BL")
+
+# gets number of patients in the proteomic dataset from the full sporadic cohort
+length(unique(proteomic_data_CSF_project_151_full_sporadic_cohort$PATNO))
+
+```
+
+```{r}
+# loads the selected CSF proteomic features from "PPMI_Data_Exploration_Proteomics_based_on_UPDRS.Rmd"
+selected_CSF_prot_features <- read.table(file.path(main_directory, "selected_proteomic_features_CSF_from_UPDRS_A_vs_B.txt"))$V1
+```
+
+
+```{r}
+# filters the CSF proteomic data to the selected features from PPMI_Data_Exploration_Proteomics_based_on_UPDRS.Rmd
+# and pivots the table into an expression matrix
+proteomic_exp_data_meeting_threshold_CSF_full_sporadic_cohort <- proteomic_data_CSF_project_151_full_sporadic_cohort %>% dplyr::filter(CLINICAL_EVENT == "BL") %>% dplyr::select(PATNO, TESTNAME, TESTVALUE) %>% dplyr::filter(TESTNAME %in% selected_CSF_prot_features) %>% pivot_wider(id_cols = "PATNO", values_from = "TESTVALUE", names_from = "TESTNAME") %>% arrange(PATNO) %>% column_to_rownames("PATNO")
+```
+
+
+```{r}
+# checks the head and dimensions of the resulting dataframe
+head(proteomic_exp_data_meeting_threshold_CSF_full_sporadic_cohort)
+dim(proteomic_exp_data_meeting_threshold_CSF_full_sporadic_cohort)
+```
+
+
+```{r}
+# scales the proteomic data to prepare for clustering
+proteomic_exp_for_clustering_CSF_full_sporadic_cohort <- scale(proteomic_exp_data_meeting_threshold_CSF_full_sporadic_cohort)
+```
+
+
+```{r}
+# performs imputation on missing values, replacing na values with the scaled mean of 0.
+# also prints the fraction of missing values
+# credit to https://stackoverflow.com/questions/8161836/how-do-i-replace-na-values-with-zeros-in-an-r-dataframe
+# for help with this technique
+sum(is.na(proteomic_exp_for_clustering_CSF_full_sporadic_cohort)) / (nrow(proteomic_exp_for_clustering_CSF_full_sporadic_cohort) * ncol(proteomic_exp_for_clustering_CSF_full_sporadic_cohort))
+proteomic_exp_for_clustering_CSF_full_sporadic_cohort[is.na(proteomic_exp_for_clustering_CSF_full_sporadic_cohort)] <- 0
+```
+
+
+```{r}
+# checks for outliers and normality in the urine measurements meeting the threshold
+hist(proteomic_exp_for_clustering_CSF_full_sporadic_cohort[,1], main = "CSF Proteomic Normality Test 1")
+hist(proteomic_exp_for_clustering_CSF_full_sporadic_cohort[,2], main = "CSF Proteomic Normality Test 2")
+hist(proteomic_exp_for_clustering_CSF_full_sporadic_cohort[,3], main = "CSF Proteomic Normality Test 3")
+hist(proteomic_exp_for_clustering_CSF_full_sporadic_cohort[,4], main = "CSF Proteomic Normality Test 4")
+hist(proteomic_exp_for_clustering_CSF_full_sporadic_cohort[,5], main = "CSF Proteomic Normality Test 5")
+```
+
+
+
+
+
+
+
+### The following code block gets cases with both transcriptomic and proteomic data in a format to use in iClusterBayes
+
+
+```{r}
+# for transcriptomics, urine proteomics, and CSF proteomics
+length(row.names(transcriptomic_exp_for_clustering_full_sporadic_cohort))
+length(row.names(proteomic_exp_for_clustering_urine_full_sporadic_cohort))
+length(row.names(proteomic_exp_for_clustering_CSF_full_sporadic_cohort))
+
+cases_with_selected_omics_data <- row.names(transcriptomic_exp_for_clustering_full_sporadic_cohort)[row.names(transcriptomic_exp_for_clustering_full_sporadic_cohort) %in% row.names(proteomic_exp_for_clustering_urine_full_sporadic_cohort)]
+
+# if considering CSF data, further subset the cohort to those with CSF data
+if(consider_CSF_data){
+    cases_with_selected_omics_data <- cases_with_selected_omics_data[cases_with_selected_omics_data %in% row.names(proteomic_exp_for_clustering_CSF_full_sporadic_cohort)]
+}
+
+length(cases_with_selected_omics_data)
+
+cases_with_selected_omics_data
+```
+
+
+```{r}
+# filters the selected cases to only those with data from the transcriptomic and proteomic modalities.
+transcriptomics_for_icluster_full_sporadic_cohort <- transcriptomic_exp_for_clustering_full_sporadic_cohort[cases_with_selected_omics_data,]
+urine_proteomics_for_icluster_full_sporadic_cohort <- proteomic_exp_for_clustering_urine_full_sporadic_cohort[cases_with_selected_omics_data,]
+
+# filters the CSF proteomic data to use if desired
+CSF_proteomics_for_icluster_full_sporadic_cohort <- NULL # initializes the variable
+if(consider_CSF_data){
+    CSF_proteomics_for_icluster_full_sporadic_cohort <- proteomic_exp_for_clustering_CSF_full_sporadic_cohort[cases_with_selected_omics_data,]
+}
+```
+
+```{r}
+# writes a list of the selected cases with transcriptomic data to export for generalizability tests in AMP
+writeLines(paste0("'PP-", paste(row.names(transcriptomic_exp_for_clustering_full_sporadic_cohort), collapse = "', 'PP-")), file.path(main_directory, "PPMI_sporadic_cases_with_tran_data_full_sporadic_cohort.txt"), "'")
+```
+
+
+#### The following code blocks create a summary table with the numbers of participants and their demographic information across the different omics modalities
+
+
+```{r}
+
+# defines function to return the mean age and standard deviation of a participant group
+get_mean_age_and_sd_as_string <- function(participant_group){
+  
+    paste0(round(mean((curated_data %>% dplyr::filter(PATNO %in% participant_group & EVENT_ID == "BL"))$age)), " (" , round(sd((curated_data %>% dplyr::filter(PATNO %in% participant_group & EVENT_ID == "BL"))$age)), ")")
+}
+
+# defines function to return the median disease duration and IQR of a participant group
+get_median_duration_and_IQR_as_string <- function(participant_group){
+
+    paste0(round(median((curated_data %>% dplyr::filter(PATNO %in% participant_group & EVENT_ID == "BL"))$duration_yrs, na.rm = TRUE), digits = 1), " [" , round(quantile((curated_data %>% dplyr::filter(PATNO %in% participant_group & EVENT_ID == "BL"))$duration_yrs, 0.25, na.rm = TRUE), digits = 1), " - ", round(quantile((curated_data %>% dplyr::filter(PATNO %in% participant_group & EVENT_ID == "BL"))$duration_yrs, 0.75, na.rm = TRUE), digits = 1), "]")
+}
+
+# defines function to return the male percentage of a participant group
+get_male_percent <- function(participant_group){
+    round(100 * mean((curated_data %>% dplyr::filter(PATNO %in% participant_group & EVENT_ID == "BL"))$SEX == 1))
+}
+```
+
+```{r}
+# defines a function to create a row in the demographic summary table
+# "name" determines the name of the row as a string
+# "participant_group" is the list of PATNOs in the group as a vector
+create_summary_table_row <- function(name, participant_group){
+  
+    # returns the row with the number of participants, the mean age, the median disease duration, and the percentage of males.
+    return(data.frame(group = c(name),
+                      Num_participants = length(participant_group),
+                      #With_UPDRS_clust = sum(participant_group%in%c(cluster_A_patients_overall,cluster_B_patients_overall)),
+                      Mean_age = get_mean_age_and_sd_as_string(participant_group),
+                      Median_disease_duration = get_median_duration_and_IQR_as_string(participant_group),
+                      Male_percent = get_male_percent(participant_group)) %>% column_to_rownames("group"))
+}
+```
+
+
+
+```{r}
+# creates the first part of the table with to total cases, cases with tran data, and cases with urine prot data
+omics_sample_summary_table <- rbind(create_summary_table_row("Total cases available",
+                                                             full_sporadic_cohort_PATNOs),
+                                    create_summary_table_row("Cases with transcriptomic data",
+                                                             row.names(transcriptomic_exp_for_clustering_full_sporadic_cohort)),
+                                    create_summary_table_row("Cases with urine proteomic data",
+                                                             row.names(proteomic_exp_for_clustering_urine_full_sporadic_cohort)))
+
+# if considering CSF data, adds a column for the CSF sample and then adds the final column for participants with all data types
+if(consider_CSF_data){
+  
+    omics_sample_summary_table <- rbind(omics_sample_summary_table,
+                                        create_summary_table_row("Cases with CSF prot data",
+                                                             row.names(proteomic_exp_for_clustering_CSF_full_sporadic_cohort)),
+                                        create_summary_table_row("Cases with tran, urine prot, and CSF prot data",
+                                                             cases_with_selected_omics_data))
+    
+# if not considering CSF data, adds the final column for participants who have both tran and urine prot data
+} else {
+  
+    omics_sample_summary_table <- rbind(omics_sample_summary_table,
+                                        create_summary_table_row("Cases with both tran and urine prot data",
+                                                                 cases_with_selected_omics_data))
+}
+
+# displays the summary table
+omics_sample_summary_table
+```
+
+
+
+### Runs iClusterBayes to generate multi-omic clusters from the transcriptomic and proteomic data
+
+```{r}
+
+# initializes the variable to store the results of iClusterBayes
+icluster_tune_results_full_sporadic_cohort <- c()
+
+if(consider_CSF_data){
+   
+    # sets seed to produce consistent iCluster results
+    set.seed(648)
+
+    # uses tune.iClusterBayes to find ideal number of clusters
+    # credit to https://rdrr.io/bioc/iClusterPlus/man/tune.iClusterBayes.html
+    # for help with this function
+    # Credit to https://rdrr.io/bioc/iClusterPlus/man/iClusterBayes.html
+    # for help with the iClusterBayes function.
+    icluster_tune_results_full_sporadic_cohort <- tune.iClusterBayes(dt1 = transcriptomics_for_icluster_full_sporadic_cohort, dt2 = urine_proteomics_for_icluster_full_sporadic_cohort, dt3 = CSF_proteomics_for_icluster_full_sporadic_cohort, type = c("gaussian", "gaussian", "gaussian"))
+  
+} else {
+
+    # sets seed to produce consistent iCluster results
+    set.seed(648)
+
+    # uses tune.iClusterBayes to find ideal number of clusters
+    icluster_tune_results_full_sporadic_cohort <- tune.iClusterBayes(dt1 = transcriptomics_for_icluster_full_sporadic_cohort, dt2 = urine_proteomics_for_icluster_full_sporadic_cohort, type = c("gaussian", "gaussian"))
+    
+}
+
+sapply(1:6, function(i){icluster_tune_results_full_sporadic_cohort$fit[[i]]$BIC})
+```
+
+
+```{r}
+### OPTIONAL CODE BLOCK TO TEST CLUSTERING ONLY USING CSF PROTEOMIC DATA ###
+
+# sets seed to produce consistent iCluster results
+set.seed(648)
+
+# uses tune.iClusterBayes to find ideal number of clusters
+# credit to https://rdrr.io/bioc/iClusterPlus/man/tune.iClusterBayes.html
+# for help with this function
+# Credit to https://rdrr.io/bioc/iClusterPlus/man/iClusterBayes.html
+# for help with the iClusterBayes function.
+icluster_tune_results_full_sporadic_cohort <- tune.iClusterBayes(dt1 = proteomic_exp_for_clustering_CSF_full_sporadic_cohort, type = c("gaussian"))
+
+sapply(1:6, function(i){icluster_tune_results_full_sporadic_cohort$fit[[i]]$BIC})
+
+# sets the list of participant ids to be those with CSF data
+cases_with_selected_omics_data <- row.names(proteomic_exp_for_clustering_CSF_full_sporadic_cohort)
+```
+
+```{r}
+### OPTIONAL CODE BLOCK TO TEST CLUSTERING ONLY USING TRANSCRIPTOMIC DATA ###
+
+# sets seed to produce consistent iCluster results
+set.seed(648)
+
+# uses tune.iClusterBayes to find ideal number of clusters
+# credit to https://rdrr.io/bioc/iClusterPlus/man/tune.iClusterBayes.html
+# for help with this function
+# Credit to https://rdrr.io/bioc/iClusterPlus/man/iClusterBayes.html
+# for help with the iClusterBayes function.
+icluster_tune_results_full_sporadic_cohort <- tune.iClusterBayes(dt1 = transcriptomic_exp_for_clustering_full_sporadic_cohort, type = c("gaussian"))
+
+sapply(1:6, function(i){icluster_tune_results_full_sporadic_cohort$fit[[i]]$BIC})
+
+# sets the list of participant ids to be those with transcriptomic data
+cases_with_selected_omics_data <- row.names(transcriptomic_exp_for_clustering_full_sporadic_cohort)
+```
+
+
+```{r}
+# gets the iClusterBayes results from the optimal tuning in the code chunk above
+
+icluster_results_full_sporadic_cohort <- icluster_tune_results_full_sporadic_cohort$fit[[2]]
+
+# swaps cluster numbers so that they are ordered in descending order by relative size
+# this particular swap applies to the results from when using CSF data with a seed of 648.
+icluster_results_full_sporadic_cohort$clusters <- case_when(icluster_results_full_sporadic_cohort$clusters == 1 ~ 3,
+                                                            icluster_results_full_sporadic_cohort$clusters == 2 ~ 2,
+                                                            icluster_results_full_sporadic_cohort$clusters == 3 ~ 1)
+
+# gets metadata with cluster assignments
+
+icluster_metadata_full_sporadic_cohort <- data.frame(PATNO = cases_with_selected_omics_data, iclust = icluster_results_full_sporadic_cohort$clusters, UPDRS_clust = case_when(cases_with_selected_omics_data %in% cluster_A_patients_overall ~ "A", cases_with_selected_omics_data %in% cluster_B_patients_overall ~ "B", TRUE ~ "No cluster"))
+
+icluster_metadata_full_sporadic_cohort
+
+# extracts the principal components from the expression data
+# credit to https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/prcomp
+# for help with this code
+#icluster_results_pca <- as.data.frame(prcomp(cbind(transcriptomics_for_icluster_full_sporadic_cohort, urine_proteomics_for_icluster_full_sporadic_cohort, CSF_proteomics_for_icluster_full_sporadic_cohort))$x) %>% mutate(clust = as.factor(icluster_results_full_sporadic_cohort$clusters))
+
+# extracts the variance explained by each PC
+# credit to https://stackoverflow.com/questions/62422277/how-to-obtain-principal-component-variance-explained-in-r-prcomp-and-prepro
+# for help with this code.
+#icluster_pca_var_pcts <- round(summary(prcomp(cbind(transcriptomics_for_icluster_full_sporadic_cohort, urine_proteomics_for_icluster_full_sporadic_cohort, CSF_proteomics_for_icluster_full_sporadic_cohort)))$importance[2,] * 100, 1)
+
+# plots the top 2 PCs colored by cluster
+#ggplot(icluster_results_pca, aes(x = PC1, y = PC2, color = clust)) + geom_point() + labs(title = "PCs 1 & 2 of iClusterBayes results, colored according to cluster", x = paste0("PC1 (", icluster_pca_var_pcts[1], "%)"), y = paste0("PC2 (", icluster_pca_var_pcts[2], "%)")) + scale_color_manual(values = cluster_colors)
+
+
+# creates plots showing the proportions of UPDRS-based and proteomic-based clusters in each cluster from iClusterBayes.
+
+ggplot(icluster_metadata_full_sporadic_cohort, aes(x = as.factor(iclust), fill = as.factor(UPDRS_clust))) + geom_bar() + labs(x = "Cluster from iClusterBayes", fill = "UPDRS-based cluster") + scale_fill_manual(values = c("red", "blue", "grey"))
+
+# uses iClusterBayes meanZ results to create scatterplots to visualize the clusters
+ggplot(data.frame(x_val = icluster_results_full_sporadic_cohort$meanZ[,1], y_val = icluster_results_full_sporadic_cohort$meanZ[,2], iclust = icluster_metadata_full_sporadic_cohort$iclust), aes(x = x_val, y = y_val, color = as.factor(iclust))) + geom_point() + labs(color = "Cluster from iClusterBayes") + scale_color_manual(values = cluster_colors) + labs(x = "1st meanZ value from iClusterBayes", y = "2nd meanZ value from iClusterBayes") + theme_bw()
+
+ggplot(data.frame(x_val = icluster_results_full_sporadic_cohort$meanZ[,1], y_val = icluster_results_full_sporadic_cohort$meanZ[,2], UPDRS_clust = icluster_metadata_full_sporadic_cohort$UPDRS_clust), aes(x = x_val, y = y_val, color = as.factor(UPDRS_clust))) + geom_point() + labs(color = "UPDRS-based cluster")
+```
+
+```{r}
+# gets table of number of participants by cluster
+table(icluster_metadata_full_sporadic_cohort$iclust)
+chisq.test(table(icluster_metadata_full_sporadic_cohort$iclust, icluster_metadata_full_sporadic_cohort$UPDRS_clust))
+chisq.test(table(icluster_metadata_full_sporadic_cohort$iclust, icluster_metadata_full_sporadic_cohort$UPDRS_clust)[,1:2])
+```
+
+```{r}
+
+# credit to https://rdrr.io/bioc/iClusterPlus/man/iClusterBayes.html
+# and https://bioconductor.posit.co/packages/3.22/bioc/manuals/iClusterPlus/man/iClusterPlus.pdf
+# for help with understanding the beta values in iClusterBayes
+
+
+# gets the transcriptomic features from the first latent space dimension
+# sorted by decreasing beta values, which can support GSEA analysis
+latent_dim_1_betas <- icluster_results_full_sporadic_cohort$beta[[1]][,1]
+names(latent_dim_1_betas) <- substr(colnames(transcriptomics_for_icluster_full_sporadic_cohort), 1, 15)
+latent_dim_1_betas <- rev(sort(latent_dim_1_betas))
+head(latent_dim_1_betas)
+
+# gets the transcriptomic features from the second latent space dimension
+# sorted by decreasing beta values, which can support GSEA analysis
+latent_dim_2_betas <- icluster_results_full_sporadic_cohort$beta[[1]][,2]
+names(latent_dim_2_betas) <- substr(colnames(transcriptomics_for_icluster_full_sporadic_cohort), 1, 15)
+latent_dim_2_betas <- rev(sort(latent_dim_2_betas))
+head(latent_dim_2_betas)
+```
+
+
+
+
+```{r}
+# this code block creates an annotated heatmap of the scaled expression levels by cluster 
+
+
+# creates cluster annotations for the heatmap. 
+# credit to https://www.datanovia.com/en/lessons/heatmap-in-r-static-and-interactive-visualization/
+# for help with this method.
+clust_annotation <- HeatmapAnnotation(cluster = as.factor(icluster_results_full_sporadic_cohort$clusters),
+                                      age = unlist(sapply(cases_with_selected_omics_data, function(patno) {(curated_data %>% dplyr::filter(EVENT_ID == "BL" & PATNO == patno))$age})),
+                                      disease_duration = unlist(sapply(cases_with_selected_omics_data, function(patno) {(curated_data %>% dplyr::filter(EVENT_ID == "BL" & PATNO == patno))$duration_yrs})),
+                                      col = list(cluster = c("1" = cluster_colors[1], "2" = cluster_colors[2], "3" = cluster_colors[3])
+                                      ))
+
+# creates the heatmap of the scaled expression levels by cluster.
+# Credit to https://www.datanovia.com/en/lessons/heatmap-in-r-static-and-interactive-visualization/
+# and https://www.biostars.org/p/286946/
+# and https://stackoverflow.com/questions/60617631/order-of-slices-in-complexheatmap-package
+# for help with this code.
+if(consider_CSF_data){
+    Heatmap(t(cbind(transcriptomics_for_icluster_full_sporadic_cohort, urine_proteomics_for_icluster_full_sporadic_cohort, CSF_proteomics_for_icluster_full_sporadic_cohort)), name = "Scaled Expression Levels", top_annotation = clust_annotation, cluster_rows = FALSE, show_row_names = FALSE, show_column_names = FALSE, column_split = icluster_results_full_sporadic_cohort$clusters, row_split = c(rep("transcriptomics", ncol(transcriptomics_for_icluster_full_sporadic_cohort)), rep("u.p.", ncol(urine_proteomics_for_icluster_full_sporadic_cohort)), rep("CSF prot", ncol(CSF_proteomics_for_icluster_full_sporadic_cohort))))
+  
+} else {
+    Heatmap(t(cbind(transcriptomics_for_icluster_full_sporadic_cohort, urine_proteomics_for_icluster_full_sporadic_cohort)), name = "Scaled Expression Levels", top_annotation = clust_annotation, cluster_rows = FALSE, show_row_names = FALSE, show_column_names = FALSE, column_split = icluster_results_full_sporadic_cohort$clusters, row_split = c(rep("transcriptomics", ncol(transcriptomics_for_icluster_full_sporadic_cohort)), rep("proteomics", ncol(urine_proteomics_for_icluster_full_sporadic_cohort))))
+  
+}
+```
+
+```{r}
+### GENERATES HEATMAP WHEN *ONLY* CONISDERING CSF PROTEOMIC DATA ###
+Heatmap(t(proteomic_exp_for_clustering_CSF_full_sporadic_cohort), name = "Scaled Expression Levels", top_annotation = clust_annotation, cluster_rows = FALSE, show_row_names = FALSE, show_column_names = FALSE, column_split = icluster_results_full_sporadic_cohort$clusters, row_split = rep("CSF prot", ncol(proteomic_exp_for_clustering_CSF_full_sporadic_cohort)))
+```
+
+```{r}
+### GENERATES HEATMAP WHEN *ONLY* CONISDERING TRANSCRIPTOMIC DATA ###
+Heatmap(t(transcriptomic_exp_for_clustering_full_sporadic_cohort), name = "Scaled Expression Levels", top_annotation = clust_annotation, cluster_rows = FALSE, show_row_names = FALSE, show_column_names = FALSE, column_split = icluster_results_full_sporadic_cohort$clusters, row_split = rep("transcriptomics", ncol(transcriptomic_exp_for_clustering_full_sporadic_cohort)))
+```
+
+
+```{r}
+# defines function to return median values in the curated metadata from years 0 - 3
+# from a specified participant id and score type
+get_med_Y0_3_Scores <- function(patno, score_type){
+    return(median(unlist(sapply(c(0:3), function(years){(curated_data %>% dplyr::filter(PATNO == patno & YEAR == years))[[score_type]]})), na.rm = TRUE))
+}
+```
+
+
+
+```{r}
+# sets a type of UPDRS score to test. Can be either "updrs_totscore", "updrs1_score", "updrs2_score", "updrs3_score", or "updrs4_score".
+PPMI_molecular_clusters_score_to_test <- "updrs_totscore"
+
+
+# For each cluster, extracts the median UPDRS scores from each patient across years 0 - 3
+clust1_scores_full_sporadic_cohort <- unlist(sapply(cases_with_selected_omics_data[icluster_results_full_sporadic_cohort$clusters == 1], function(patno){get_med_Y0_3_Scores(patno, PPMI_molecular_clusters_score_to_test)}))
+
+clust2_scores_full_sporadic_cohort <- unlist(sapply(cases_with_selected_omics_data[icluster_results_full_sporadic_cohort$clusters == 2], function(patno){get_med_Y0_3_Scores(patno, PPMI_molecular_clusters_score_to_test)}))
+
+clust3_scores_full_sporadic_cohort <- unlist(sapply(cases_with_selected_omics_data[icluster_results_full_sporadic_cohort$clusters == 3], function(patno){get_med_Y0_3_Scores(patno, PPMI_molecular_clusters_score_to_test)}))
+
+# create ggplot boxplot to show score distribution differences by cluster
+# Credit to https://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+# for help with setting up custom colors.
+# Credit to https://stackoverflow.com/questions/35618260/remove-legend-ggplot-2-2
+# for help with removing the legend.
+ggplot_updrs_scores_by_clust <-  ggplot(data.frame(scores = c(clust1_scores_full_sporadic_cohort, clust2_scores_full_sporadic_cohort, clust3_scores_full_sporadic_cohort), clust = c(rep("1", length(clust1_scores_full_sporadic_cohort)), rep("2", length(clust2_scores_full_sporadic_cohort)), rep("3", length(clust3_scores_full_sporadic_cohort)))), aes(x = clust, y = scores, fill = clust)) + scale_fill_manual(values = cluster_colors) + theme(legend.position = "none")
+
+# prints the ggplot with a legend based on the relevant UPDRS section, as a box plot
+ggplot_updrs_scores_by_clust + labs(x = "Cluster", y = paste0("Median ", PPMI_molecular_clusters_score_to_test, " from Years 0 - 3")) + geom_boxplot()
+
+# prints the ggplot with a legend based on the relevant UPDRS section, as a jitter plot over a boxplot with reduced transparency
+# credit to https://ggplot2.tidyverse.org/reference/geom_boxplot.html
+# and https://ggplot2.tidyverse.org/reference/geom_jitter.html
+# for help with this code
+ggplot_updrs_scores_by_clust + labs(x = "Cluster", y = paste0("Median ", PPMI_molecular_clusters_score_to_test, " from Years 0 - 3")) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + theme_bw()
+
+# creates an additional set of plots with a cleaner y-axis label if using the total score.
+if(PPMI_molecular_clusters_score_to_test == "updrs_totscore"){
+    # the box plot
+    print(ggplot_updrs_scores_by_clust + labs(x = "Cluster", y = paste0("Median UPDRS Total Scores from Years 0 - 3")) + geom_boxplot())
+  
+    # the jitter plot over the box plot
+    print(ggplot_updrs_scores_by_clust + labs(x = "Cluster", y = paste0("Median UPDRS Total Scores from Years 0 - 3")) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + theme_bw())
+}
+
+# performs kruskal test to get significance of score differences across clusters.
+kruskal.test(scores ~ clust, data.frame(scores = c(clust1_scores_full_sporadic_cohort, clust2_scores_full_sporadic_cohort, clust3_scores_full_sporadic_cohort), clust = c(rep("1", length(clust1_scores_full_sporadic_cohort)), rep("2", length(clust2_scores_full_sporadic_cohort)), rep("3", length(clust3_scores_full_sporadic_cohort)))))
+```
+
+```{r}
+# gets number of recorded scores in each cluster
+length(cases_with_selected_omics_data)
+length(clust1_scores_full_sporadic_cohort[!is.na(clust1_scores_full_sporadic_cohort)])
+length(clust2_scores_full_sporadic_cohort[!is.na(clust2_scores_full_sporadic_cohort)])
+length(clust3_scores_full_sporadic_cohort[!is.na(clust3_scores_full_sporadic_cohort)])
+```
+
+
+```{r}
+# stores the clustering results with covariates to test for robustness of clinical implications
+clustering_results_with_covariates <- icluster_metadata_full_sporadic_cohort %>% mutate(UPDRS_outcome = unlist(sapply(PATNO, function(patno){get_med_Y0_3_Scores(patno, "updrs_totscore")})), MoCA_outcome = unlist(sapply(PATNO, function(patno){get_med_Y0_3_Scores(patno, "moca")})), UPSIT_outcome = unlist(sapply(PATNO, function(patno){get_med_Y0_3_Scores(patno, "upsit")})), age = unlist(sapply(PATNO, function(patno){(curated_data %>% dplyr::filter(YEAR == 0 & PATNO == patno))[["age"]]})), sex = as.factor(unlist(sapply(PATNO, function(patno){(curated_data %>% dplyr::filter(YEAR == 0 & PATNO == patno))[["SEX"]]}))))
+
+# performs statistical tests on the robustness of clinical implications after adjusting for covariates
+# credit to https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/aov
+# for help with the aov function
+
+# tests UPDRS outcomes
+kruskal.test(UPDRS_outcome ~ as.factor(iclust), clustering_results_with_covariates)
+summary(aov(UPDRS_outcome ~ as.factor(iclust), clustering_results_with_covariates))
+summary(aov(UPDRS_outcome ~ age + sex + as.factor(iclust), clustering_results_with_covariates))
+
+# tests MoCA outcomes
+kruskal.test(MoCA_outcome ~ as.factor(iclust), clustering_results_with_covariates)
+summary(aov(MoCA_outcome ~ as.factor(iclust), clustering_results_with_covariates))
+summary(aov(MoCA_outcome ~ age + sex + as.factor(iclust), clustering_results_with_covariates))
+
+# tests UPSIT outcomes
+kruskal.test(UPSIT_outcome ~ as.factor(iclust), clustering_results_with_covariates)
+summary(aov(UPSIT_outcome ~ as.factor(iclust), clustering_results_with_covariates))
+summary(aov(UPSIT_outcome ~ age + sex + as.factor(iclust), clustering_results_with_covariates))
+```
+
+
+### This code block explores correlations between UPDRS scores and iClusterBayes latent dimensions
+
+```{r}
+# gets data frame with UPDRS scores and latent dimensions
+UPDRS_scores_by_latent_dims <- data.frame(latent_dim_1 = icluster_results_full_sporadic_cohort$meanZ[,1], latent_dim_2 = icluster_results_full_sporadic_cohort$meanZ[,2], UPDRS_totscores = sapply(cases_with_selected_omics_data, function(patno){get_med_Y0_3_Scores(patno, "updrs_totscore")}))
+
+# plots the UPDRS total scores by the latent dimensions
+# credit to https://ggplot2.tidyverse.org/reference/geom_smooth.html
+# for help with this code
+ggplot(UPDRS_scores_by_latent_dims, aes(x = latent_dim_1, y = UPDRS_totscores)) + geom_point() + geom_smooth(method = "lm", se = F) + labs(x = "1st Latent Dimension from iClusterBayes meanZ output", y = "Median UPDRS Total Scores from Years 0 - 3") + theme_bw()
+ggplot(UPDRS_scores_by_latent_dims, aes(x = latent_dim_2, y = UPDRS_totscores)) + geom_point() + geom_smooth(method = "lm", se = F) + labs(x = "2nd Latent Dimension from iClusterBayes meanZ output", y = "Median UPDRS Total Scores from Years 0 - 3") + theme_bw()
+
+# gets summaries of linear models of the relationship between UPDRS and latent dimensions
+summary(lm(UPDRS_totscores ~ latent_dim_1, UPDRS_scores_by_latent_dims))
+summary(lm(UPDRS_totscores ~ latent_dim_2, UPDRS_scores_by_latent_dims))
+```
+
+```{r}
+# This code block tests for relationships between another variable and the iClusterBayes latent space dimensions
+
+test_var_across_latent_dims <- function(var_of_interest){
+
+    # gets data frame with the variable of interest and latent dimensions
+    var_by_latent_dims <- data.frame(latent_dim_1 = icluster_results_full_sporadic_cohort$meanZ[,1], latent_dim_2 = icluster_results_full_sporadic_cohort$meanZ[,2], var_of_interest_values = sapply(cases_with_selected_omics_data, function(patno){(curated_data %>% dplyr::filter(YEAR == 0 & PATNO == patno))[[var_of_interest]]}))
+    
+    # plots the variable of interest by the latent dimensions
+    # credit to https://ggplot2.tidyverse.org/reference/geom_smooth.html
+    # for help with this code
+    print(ggplot(var_by_latent_dims, aes(x = latent_dim_1, y = var_of_interest_values)) + geom_point() + geom_smooth(method = "lm", se = F) + labs(x = "1st Latent Dimension from iClusterBayes meanZ output", y = paste0(var_of_interest, " (at baseline)")) + theme_bw())
+    print(ggplot(var_by_latent_dims, aes(x = latent_dim_2, y = var_of_interest_values)) + geom_point() + geom_smooth(method = "lm", se = F) + labs(x = "2nd Latent Dimension from iClusterBayes meanZ output", y = paste0(var_of_interest, " (at baseline)")) + theme_bw())
+
+    # gets summaries of linear models of the relationship between the variable of interest and latent dimensions
+    print(summary(lm(var_of_interest_values ~ latent_dim_1, var_by_latent_dims)))
+    print(summary(lm(var_of_interest_values ~ latent_dim_2, var_by_latent_dims)))
+}
+```
+
+```{r}
+test_var_across_latent_dims("tau")
+```
+
+
+
+### The following code blocks perform pairwise and effect size tests on the scores by cluster
+
+```{r}
+# performs pairwise tests on the UPDRS scores across the clusters created above (PPMI sporadic)
+pairwise.wilcox.test(c(clust1_scores_full_sporadic_cohort, clust2_scores_full_sporadic_cohort, clust3_scores_full_sporadic_cohort), c(rep("1", length(clust1_scores_full_sporadic_cohort)), rep("2", length(clust2_scores_full_sporadic_cohort)), rep("3", length(clust3_scores_full_sporadic_cohort))))
+
+# repeats test with Benjamini-Hochberg adjustment
+pairwise.wilcox.test(c(clust1_scores_full_sporadic_cohort, clust2_scores_full_sporadic_cohort, clust3_scores_full_sporadic_cohort), c(rep("1", length(clust1_scores_full_sporadic_cohort)), rep("2", length(clust2_scores_full_sporadic_cohort)), rep("3", length(clust3_scores_full_sporadic_cohort))), p.adjust.method = "BH")
+```
+
+```{r}
+# finds the effect size for the difference in scores between the first two clusters
+# credit to https://www.rdocumentation.org/packages/rstatix/versions/0.7.3/topics/wilcox_effsize
+# for help with this function
+wilcox_effsize(data.frame(score = c(clust1_scores_full_sporadic_cohort, clust2_scores_full_sporadic_cohort), clust = c(rep("1", length(clust1_scores_full_sporadic_cohort)), rep("2", length(clust2_scores_full_sporadic_cohort)))), score ~ clust)
+
+# finds the effect size for the difference in scores between the first cluster and the other two clusters (group 1 vs group 2)
+wilcox_effsize(data.frame(score = c(clust1_scores_full_sporadic_cohort, clust2_scores_full_sporadic_cohort, clust3_scores_full_sporadic_cohort), group = c(rep("1", length(clust1_scores_full_sporadic_cohort)), rep("2", length(c(clust2_scores_full_sporadic_cohort, clust3_scores_full_sporadic_cohort))))), score ~ group)
+
+# tests significance of difference between cluster 1 and the other two clusters combined
+wilcox.test(c(clust1_scores_full_sporadic_cohort), c(clust2_scores_full_sporadic_cohort, clust3_scores_full_sporadic_cohort))
+
+```
+
+
+
+### The following code blocks explore genetic data in relation to the clusters created above.
+
+
+```{r}
+# gets the overview of genetic information from PPMI
+genetic_overview_information <- read.csv(file.path(main_directory, "Genomic_Analysis/PPMI_Project_9001_20250624_21Oct2025.csv"))
+head(genetic_overview_information)
+```
+
+```{r}
+# build data frame to store overview of genetic information from sporadic clustering cases
+genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort <- data.frame(PATNO = cases_with_selected_omics_data)
+
+# initializes variables to store genetic group and polygenic risk score
+ancestry_group <- c()
+polygenic_risk_score <- c()
+
+# fills in the data frame with genetic group and polygenic risk score information
+for (case in cases_with_selected_omics_data){
+  
+    # gets genetic group data 
+    # if no value in the genetic data then record an "NA"
+    if(length((genetic_overview_information %>% dplyr::filter(PATNO == case))$Genetic_PRS_InfPop) == 0){
+         ancestry_group <- c(ancestry_group, NA)
+    # if there is one value then record that value
+    }else if(length((genetic_overview_information %>% dplyr::filter(PATNO == case))$Genetic_PRS_InfPop) == 1){
+         ancestry_group <- c(ancestry_group, (genetic_overview_information %>% dplyr::filter(PATNO == case))$Genetic_PRS_InfPop)
+    # if there are more than one value for a case, then record a duplicate measurement
+    }else{
+        ancestry_group <- c(ancestry_group, "Duplicate value")
+    }
+  
+    # gets polygenic risk score data 
+    # if no value in the genetic data then record an "NA"
+    if(length((genetic_overview_information %>% dplyr::filter(PATNO == case))$Genetic_PRS_PRSp90) == 0){
+         polygenic_risk_score <- c(polygenic_risk_score, NA)
+    # if there is one value then record that value
+    }else if(length((genetic_overview_information %>% dplyr::filter(PATNO == case))$Genetic_PRS_PRSp90) == 1){
+         polygenic_risk_score <- c(polygenic_risk_score, (genetic_overview_information %>% dplyr::filter(PATNO == case))$Genetic_PRS_PRSp90)
+    # if there are more than one value for a case, then record a duplicate measurement
+    }else{
+        polygenic_risk_score <- c(polygenic_risk_score, "Duplicate value")
+    }
+}
+
+# store the measurements in the data frame and print the head
+genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$ancestry_group <- ancestry_group
+genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$PRS <- polygenic_risk_score
+head(genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort)
+```
+
+
+
+```{r}
+# plots the cases from integrative clustering with color indicating genetic group
+
+ggplot(data.frame(PC1 = icluster_results_pca$PC1, PC2 = icluster_results_pca$PC2, ancestry_group = genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$ancestry_group), aes(x = PC1, y = PC2, color = as.factor(ancestry_group))) + geom_point() + labs(color = "Ancestry Group", x = paste0("PC1 (", icluster_pca_var_pcts[1], "%)"), y = paste0("PC2 (", icluster_pca_var_pcts[2], "%)"))
+
+
+ggplot(data.frame(x_val = icluster_results_full_sporadic_cohort$meanZ[,1], y_val = icluster_results_full_sporadic_cohort$meanZ[,2], ancestry_group = genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$ancestry_group), aes(x = x_val, y = y_val, color = as.factor(ancestry_group))) + geom_point() + labs(color = "Ancestry Group", x = "1st meanZ value from iClusterBayes", y = "2nd meanZ value from iClusterBayes")
+```
+
+```{r}
+# this code block creates an annotated heatmap of the scaled expression levels by cluster, with annotations representing genetic groups and polygenic risk scores.
+
+
+# creates cluster annotations for the heatmap. 
+# credit to https://www.datanovia.com/en/lessons/heatmap-in-r-static-and-interactive-visualization/
+# for help with this method.
+clust_annotation <- HeatmapAnnotation(cluster = as.factor(icluster_results_full_sporadic_cohort$clusters),
+                                      ancestry_group = genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$ancestry_group,
+                                      polygenic_RS = genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$PRS,
+                                      col = list(cluster = c("1" = cluster_colors[1], "2" = cluster_colors[2], "3" = cluster_colors[3]),
+                                                 ancestry_group = c("AFR" = "pink", "EAS" = "orange", "EUR" = "purple", "OTHER" = "yellow")
+                                      ))
+
+# creates the heatmap of the scaled expression levels by cluster.
+# Credit to https://www.datanovia.com/en/lessons/heatmap-in-r-static-and-interactive-visualization/
+# and https://www.biostars.org/p/286946/
+# and https://stackoverflow.com/questions/60617631/order-of-slices-in-complexheatmap-package
+# for help with this code.
+if(consider_CSF_data){
+    Heatmap(t(cbind(transcriptomics_for_icluster_full_sporadic_cohort, urine_proteomics_for_icluster_full_sporadic_cohort, CSF_proteomics_for_icluster_full_sporadic_cohort)), name = "Scaled Expression Levels", top_annotation = clust_annotation, cluster_rows = FALSE, show_row_names = FALSE, show_column_names = FALSE, column_split = icluster_results_full_sporadic_cohort$clusters, row_split = c(rep("transcriptomics", ncol(transcriptomics_for_icluster_full_sporadic_cohort)), rep("u.p.", ncol(urine_proteomics_for_icluster_full_sporadic_cohort)), rep("CSF prot", ncol(CSF_proteomics_for_icluster_full_sporadic_cohort))))
+  
+} else {
+    Heatmap(t(cbind(transcriptomics_for_icluster_full_sporadic_cohort, urine_proteomics_for_icluster_full_sporadic_cohort)), name = "Scaled Expression Levels", top_annotation = clust_annotation, cluster_rows = FALSE, show_row_names = FALSE, show_column_names = FALSE, column_split = icluster_results_full_sporadic_cohort$clusters, row_split = c(rep("transcriptomics", ncol(transcriptomics_for_icluster_full_sporadic_cohort)), rep("proteomics", ncol(urine_proteomics_for_icluster_full_sporadic_cohort))))
+  
+}
+```
+
+```{r}
+# tests for significant differences in ancestry group by cluster
+fisher.test(table(genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$ancestry_group, icluster_results_full_sporadic_cohort$clusters))
+```
+
+
+```{r}
+# this code block creates boxplots and performs a kruskal test to test for differences in polygenic risk score by cluster.
+
+# create ggplot boxplot to show score distribution differences by cluster
+# Credit to https://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+# for help with setting up custom colors.
+# Credit to https://stackoverflow.com/questions/35618260/remove-legend-ggplot-2-2
+# for help with removing the legend.
+ggplot(data.frame(PRS = genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$PRS, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)), aes(x = clust, y = PRS, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot() + labs(x = "Cluster", y = "Polygenic Risk Score") + theme(legend.position = "none")
+
+# performs kruskal test to get significance of score differences across clusters.
+kruskal.test(PR_scores ~ clust, data.frame(PR_scores = genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$PRS, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)))
+```
+
+
+### The following code blocks test for disease duration and age at baseline to see if these variables are associated with different clusters
+
+```{r}
+# this code block creates boxplots and performs kruskal tests to test for differences in disease duration by cluster.
+
+# checks to make sure PATNOs from the filtered curated data match with the cases with tran and prot data
+all((curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$PATNO == cases_with_selected_omics_data)
+
+# create ggplot boxplot to show disease duration distribution differences by cluster
+# Credit to https://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+# for help with setting up custom colors.
+# Credit to https://stackoverflow.com/questions/35618260/remove-legend-ggplot-2-2
+# for help with removing the legend.
+ggplot(data.frame(disease_duration = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$duration_yrs, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)), aes(x = clust, y = disease_duration, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot() + labs(x = "Cluster", y = "Disease Duration at Baseline (Years)") + theme(legend.position = "none")
+
+# performs kruskal test to get significance of disease duration differences across clusters.
+kruskal.test(disease_duration ~ clust, data.frame(disease_duration = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$duration_yrs, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)))
+```
+
+
+```{r}
+# this code block creates boxplots and performs kruskal tests to test for differences in age by cluster.
+
+# checks to make sure PATNOs from the filtered curated data match with the cases with tran and prot data
+all((curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$PATNO == cases_with_selected_omics_data)
+
+# create ggplot boxplot to show age distribution differences by cluster
+# Credit to https://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+# for help with setting up custom colors.
+# Credit to https://stackoverflow.com/questions/35618260/remove-legend-ggplot-2-2
+# for help with removing the legend.
+ggplot(data.frame(age = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$age, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)), aes(x = clust, y = age, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot() + labs(x = "Cluster", y = "Age at Baseline") + theme(legend.position = "none")
+
+# performs kruskal test to get significance of age differences across clusters.
+kruskal.test(age ~ clust, data.frame(age = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$age, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)))
+```
+
+
+
+
+
+### The following code blocks test groupings of clusters for clinical implications.
+
+
+
+```{r}
+# forms groupings of clusters to use in downstream analyses
+iclust_grouping_1_full_sporadic_cohort <- icluster_metadata_full_sporadic_cohort[icluster_metadata_full_sporadic_cohort$iclust %in% c(1),]$PATNO
+iclust_grouping_2_full_sporadic_cohort <- icluster_metadata_full_sporadic_cohort[icluster_metadata_full_sporadic_cohort$iclust %in% c(2, 3),]$PATNO
+
+iclust_grouping_1_full_sporadic_cohort
+iclust_grouping_2_full_sporadic_cohort
+```
+
+
+
+
+
+```{r}
+
+# For each grouping, extracts the median UPDRS scores from each patient across years 0 - 3
+grouping_1_med_scores_full_sporadic_cohort <- unlist(sapply(iclust_grouping_1_full_sporadic_cohort, function(patno){get_med_Y0_3_Scores(patno, "updrs_totscore")}))
+
+grouping_2_med_scores_full_sporadic_cohort <- unlist(sapply(iclust_grouping_2_full_sporadic_cohort, function(patno){get_med_Y0_3_Scores(patno, "updrs_totscore")}))
+
+# creates boxplots to visualize median UPDRS scores by cluster grouping
+boxplot(list(grouping_1 = grouping_1_med_scores_full_sporadic_cohort, grouping_2 = grouping_2_med_scores_full_sporadic_cohort))
+
+# performs wilcox test on the differences in scores between groupings
+wilcox.test(grouping_1_med_scores_full_sporadic_cohort, grouping_2_med_scores_full_sporadic_cohort)
+
+```
+
+
+
+
+
+```{r, warning=FALSE}
+# Gets line graphs and statistical comparisons of the longitudinal UPDRS data in each of the two molecularly-defined cluster groupings
+get_UPDRS_overview_by_groups(iclust_grouping_1_full_sporadic_cohort, iclust_grouping_2_full_sporadic_cohort)
+```
+
+
+
+
+
+
+### The following code blocks perform repeated tests to account for randomness over many iterations, using multi-omics data
+
+
+
+```{r}
+
+# runs an iteration of iclusterbayes and extracts kruskal p-value applied to median UPDRS scores from years 0-3 across clusters
+iterate_icluster_and_apply_kruskal_test_full_sporadic_cohort <- function(num_clusts){
+
+    # prints the number of clusters to keep track of progress
+    print(num_clusts)
+  
+    # initializes iteration results variable
+    iteration_results <- c()
+    
+    #iteration_results <- iClusterBayes(dt1 = proteomic_exp_for_clustering_CSF_full_sporadic_cohort, type = c("gaussian"), K = num_clusts - 1)
+  
+    # gets the iClusterBayes iteration results with or without considering CSF data
+    if(consider_CSF_data){
+        iteration_results <- iClusterBayes(dt1 = transcriptomics_for_icluster_full_sporadic_cohort, dt2 = urine_proteomics_for_icluster_full_sporadic_cohort, dt3 = CSF_proteomics_for_icluster_full_sporadic_cohort, type = c("gaussian", "gaussian", "gaussian"), K = num_clusts - 1)
+      
+    } else {
+        iteration_results <- iClusterBayes(dt1 = transcriptomics_for_icluster_full_sporadic_cohort, dt2 = urine_proteomics_for_icluster_full_sporadic_cohort, type = c("gaussian", "gaussian"), K = num_clusts - 1)
+    
+    }
+
+    # gets the median year 0 - 3 UPDRS section and total scores from each cluster
+    iteration_scores_and_clust <- data.frame(sec1_score = unlist(sapply(cases_with_selected_omics_data, function(patno){get_med_Y0_3_Scores(patno, "updrs1_score")})),
+                                             sec2_score = unlist(sapply(cases_with_selected_omics_data, function(patno){get_med_Y0_3_Scores(patno, "updrs2_score")})),
+                                             sec3_score = unlist(sapply(cases_with_selected_omics_data, function(patno){get_med_Y0_3_Scores(patno, "updrs3_score")})),
+                                             sec4_score = unlist(sapply(cases_with_selected_omics_data, function(patno){get_med_Y0_3_Scores(patno, "updrs4_score")})),
+                                             tot_score = unlist(sapply(cases_with_selected_omics_data, function(patno){get_med_Y0_3_Scores(patno, "updrs_totscore")})),
+                                             clust = iteration_results$clusters)
+
+    # performs kruskal test to get significance of score differences across clusters.
+    return(sapply(c("sec1_score", "sec2_score", "sec3_score", "sec4_score", "tot_score"), function(section){((kruskal.test(as.formula(paste0(section, " ~ clust")), iteration_scores_and_clust))$p.value)}))
+
+}
+
+iteration_num_clusts <- c(rep(2, 10), rep(3, 10), rep(4, 10), rep(5, 10))
+
+iteration_kruskal_results_full_sporadic_cohort <- sapply(iteration_num_clusts, function(num_clusts){iterate_icluster_and_apply_kruskal_test_full_sporadic_cohort(num_clusts)})
+```
+
+```{r}
+
+# visualizes the results of multiple iterations as boxplots
+# credit to https://www.sthda.com/english/wiki/ggplot2-add-straight-lines-to-a-plot-horizontal-vertical-and-regression-lines
+# for help with this code
+sapply(c("sec1_score", "sec2_score", "sec3_score", "sec4_score", "tot_score"), 
+       function(section){
+         print(ggplot(data.frame(kruskal_pvals = iteration_kruskal_results_full_sporadic_cohort[section,], num_clusts = iteration_num_clusts), aes(x = as.factor(num_clusts), y = kruskal_pvals)) + geom_boxplot(alpha = 0.7, fill = "grey") + geom_jitter(width = 0.1) + labs(x = "Number of Clusters", y = "Kruskal Test P-Value Results", title = paste0( "Distribution of Kruskal Test P-Value Results (Med Y0-3 ", section, ")")) + geom_hline(yintercept = 0.05, color = "red") + theme_bw())
+         
+         # prints the median values for each section and number of clusters
+         # credit to https://stat.ethz.ch/R-manual/R-devel/library/base/html/Round.html
+         # for help with rounding
+         for(n in unique(iteration_num_clusts)){
+            print(paste0(section, " (", n, "): ", signif(median(iteration_kruskal_results_full_sporadic_cohort[section, iteration_num_clusts == n]), 2)))
+         }
+         }
+       )
+```
+
+
+```{r}
+# creates same graph as above but uses the negative logarithm of the p-values
+sapply(c("sec1_score", "sec2_score", "sec3_score", "sec4_score", "tot_score"), 
+       function(section){
+         ggplot(data.frame(kruskal_pvals = iteration_kruskal_results_full_sporadic_cohort[section,], num_clusts = iteration_num_clusts), aes(x = as.factor(num_clusts), y = -log10(kruskal_pvals))) + geom_boxplot() + labs(x = "Number of Clusters", y = "-log10 of Kruskal Test P-Value Results", title = paste0("Distribution of Kruskal Test P-Value Results (CP Only, Med Y0-3 ", section, ")")) + geom_hline(yintercept = -log10(0.05), color = "red")
+         }
+       )
+```
+
+### The following code blocks analyze other test results across clusters to identify associations between the tests and the clusters
+
+
+```{r}
+# this code block creates boxplots and performs kruskal tests to test for differences in alpha synuclein by cluster.
+
+# checks to make sure PATNOs from the filtered curated data match with the cases with tran and prot data
+all((curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$PATNO == cases_with_selected_omics_data)
+
+# create ggplot boxplot to show asyn distribution differences by cluster
+# Credit to https://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+# for help with setting up custom colors.
+# Credit to https://stackoverflow.com/questions/35618260/remove-legend-ggplot-2-2
+# for help with removing the legend.
+ggplot(data.frame(asyn = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$asyn, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)), aes(x = clust, y = asyn, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot() + labs(x = "Cluster", y = "asyn") + theme(legend.position = "none")
+
+# gets counts of cases with asyn data by cluster
+table((data.frame(asyn = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$asyn, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)) %>% dplyr::filter(!is.na(asyn)))$clust)
+
+# performs kruskal test to get significance of alpha synuclein differences across clusters.
+kruskal.test(asyn ~ clust, data.frame(asyn = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$asyn, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)))
+```
+
+
+```{r}
+# this code block creates boxplots and performs kruskal tests to test for differences in amyloid beta by cluster.
+
+# checks to make sure PATNOs from the filtered curated data match with the cases with tran and prot data
+all((curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$PATNO == cases_with_selected_omics_data)
+
+# create ggplot boxplot to show abeta distribution differences by cluster
+# Credit to https://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+# for help with setting up custom colors.
+# Credit to https://stackoverflow.com/questions/35618260/remove-legend-ggplot-2-2
+# for help with removing the legend.
+ggplot(data.frame(abeta = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$abeta, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)), aes(x = clust, y = abeta, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot() + labs(x = "Cluster", y = "abeta") + theme(legend.position = "none")
+
+# gets counts of cases with abeta data by cluster
+table((data.frame(abeta = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$abeta, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)) %>% dplyr::filter(!is.na(abeta)))$clust)
+
+# performs kruskal test to get significance of amyloid beta differences across clusters.
+kruskal.test(abeta ~ clust, data.frame(abeta = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$abeta, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)))
+```
+
+```{r}
+# this code block creates boxplots and performs kruskal tests to test for differences in tau by cluster.
+
+# checks to make sure PATNOs from the filtered curated data match with the cases with tran and prot data
+all((curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$PATNO == cases_with_selected_omics_data)
+
+# create ggplot boxplot to show tau distribution differences by cluster
+# Credit to https://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+# for help with setting up custom colors.
+# Credit to https://stackoverflow.com/questions/35618260/remove-legend-ggplot-2-2
+# for help with removing the legend.
+ggplot(data.frame(tau = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$tau, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)), aes(x = clust, y = tau, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot() + labs(x = "Cluster", y = "tau") + theme(legend.position = "none")
+
+# gets counts of cases with tau data by cluster
+table((data.frame(tau = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$tau, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)) %>% dplyr::filter(!is.na(tau)))$clust)
+
+# performs kruskal test to get significance of tau differences across clusters.
+kruskal.test(tau ~ clust, data.frame(tau = (curated_data %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & YEAR == 0))$tau, clust = as.factor(icluster_results_full_sporadic_cohort$clusters)))
+```
+
+
+
+
+```{r}
+# this code block creates boxplots and performs kruskal tests to test for differences in moca scores by cluster.
+# uses the median moca scores from years 0 - 3 after baseline to be consistent with the UPDRS analysis.
+
+med_moca_scores_df <- data.frame(PATNO = cases_with_selected_omics_data, 
+                                 med_moca_scores = sapply(cases_with_selected_omics_data, function(patno){get_med_Y0_3_Scores(patno, "moca")}), 
+                                 clust = as.factor(icluster_results_full_sporadic_cohort$clusters))
+
+# check for no missing moca scores
+all(!is.na(med_moca_scores_df$med_moca_scores))
+
+# create ggplot boxplot to show moca distribution differences by cluster
+# Credit to https://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+# for help with setting up custom colors.
+# Credit to https://stackoverflow.com/questions/35618260/remove-legend-ggplot-2-2
+# for help with removing the legend.
+ggplot(med_moca_scores_df, aes(x = clust, y = med_moca_scores, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot() + labs(x = "Cluster", y = "Median MoCA Scores from Years 0 - 3") + theme(legend.position = "none")
+
+# plots the MoCA scores by cluster as a jitter plot over a transparent box plot
+# credit to https://ggplot2.tidyverse.org/reference/geom_boxplot.html
+# and https://ggplot2.tidyverse.org/reference/geom_jitter.html
+# for help with this code
+ggplot(med_moca_scores_df, aes(x = clust, y = med_moca_scores, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + labs(x = "Cluster", y = "Median MoCA Scores from Years 0 - 3") + theme(legend.position = "none") + theme_bw()
+
+# gets counts of cases with moca data by cluster
+table(med_moca_scores_df$clust)
+
+# performs kruskal test to get significance of moca differences across clusters.
+kruskal.test(med_moca_scores ~ clust, med_moca_scores_df)
+
+# gets the Wilcoxon p-value and effect size of cluster 1 vs clusters 2 and 3 combined
+med_moca_scores_df$clust_grouping <- case_when(med_moca_scores_df$clust %in% c(1) ~ 1,
+                                               med_moca_scores_df$clust %in% c(2, 3) ~ 2)
+wilcox.test(med_moca_scores ~ clust_grouping, med_moca_scores_df)
+wilcox_effsize(med_moca_scores_df, med_moca_scores ~ clust_grouping)
+```
+
+
+
+```{r}
+# this code block creates boxplots and performs kruskal tests to test for differences in upsit scores by cluster.
+# uses the median upsit scores from years 0 - 3 after baseline to be consistent with the UPDRS analysis.
+
+med_upsit_scores_df <- data.frame(PATNO = cases_with_selected_omics_data, 
+                                 med_upsit_scores = sapply(cases_with_selected_omics_data, function(patno){get_med_Y0_3_Scores(patno, "upsit")}), 
+                                 clust = as.factor(icluster_results_full_sporadic_cohort$clusters))
+
+# check for no missing upsit scores
+all(!is.na(med_upsit_scores_df$med_upsit_scores))
+
+# create ggplot boxplot to show upsit distribution differences by cluster
+# Credit to https://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+# for help with setting up custom colors.
+# Credit to https://stackoverflow.com/questions/35618260/remove-legend-ggplot-2-2
+# for help with removing the legend.
+ggplot(med_upsit_scores_df, aes(x = clust, y = med_upsit_scores, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot() + labs(x = "Cluster", y = "Median UPSIT Scores from Years 0 - 3") + theme(legend.position = "none")
+
+# gets counts of cases with upsit data by cluster
+table(med_upsit_scores_df$clust)
+
+# performs kruskal test to get significance of upsit differences across clusters.
+kruskal.test(med_upsit_scores ~ clust, med_upsit_scores_df)
+
+# gets the Wilcoxon p-value and effect size of cluster 1 vs clusters 2 and 3 combined
+med_upsit_scores_df$clust_grouping <- case_when(med_upsit_scores_df$clust %in% c(1) ~ 1,
+                                               med_upsit_scores_df$clust %in% c(2, 3) ~ 2)
+wilcox.test(med_upsit_scores ~ clust_grouping, med_upsit_scores_df)
+wilcox_effsize(med_upsit_scores_df, med_upsit_scores ~ clust_grouping)
+```
+
+
+
+
+
+#### The following code tests for differences in SAA outcomes by cluster
+
+```{r}
+# loads the SAA results and filters to the relevant and conclusive baseline results
+SAA_results <- read.csv(file.path(main_directory, "SAA_Biospecimen_Analysis_Results_21Feb2025.csv"))
+dim(SAA_results)
+
+SAA_results <- SAA_results %>% dplyr::filter(CLINICAL_EVENT == "BL" & PATNO %in% cases_with_selected_omics_data & SAAMethod == "Amprion-Alpha-synuclein-SAA" & SAA_Status != "Inconclusive") %>% arrange(PATNO)
+```
+
+
+```{r}
+# checks for number of results and that there is one result per participant 
+dim(SAA_results)
+length(unique(SAA_results$PATNO))
+```
+
+
+
+```{r}
+# calculates the mean values for the TTT_150h, T50_150h and AUC_150h.
+# credit to https://dplyr.tidyverse.org/articles/rowwise.html
+# for helping with the rowwise and ungroup functions
+SAA_results <- SAA_results %>% rowwise() %>% mutate(mean_TTT_150h = mean(c(TTT_150h_Rep1, TTT_150h_Rep2, TTT_150h_Rep3), na.rm = T)) %>% ungroup()
+SAA_results <- SAA_results %>% rowwise() %>% mutate(mean_T50_150h = mean(c(T50_150h_Rep1, T50_150h_Rep2, T50_150h_Rep3), na.rm = T)) %>% ungroup()
+SAA_results <- SAA_results %>% rowwise() %>% mutate(mean_AUC_150h = mean(c(AUC_150h_Rep1, AUC_150h_Rep2, AUC_150h_Rep3), na.rm = T)) %>% ungroup()
+```
+
+
+
+```{r}
+# finds the clusters corresponding to the SAA data 
+SAA_results <- SAA_results %>% mutate(clust = 
+                                        case_when(PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 1]
+                                                      ~ 1,
+                                                  PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 2]
+                                                      ~ 2,
+                                                  PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 3]
+                                                      ~ 3))
+SAA_results$clust <- as.factor(SAA_results$clust)
+
+table(SAA_results$clust)
+```
+
+
+```{r}
+# this code block tests for differences in SAA status (positive/negative) by cluster
+# credit to https://www.datacamp.com/tutorial/chi-square-test-r
+# for help with this code
+
+# creates a contingency table with the SAA clusters and positive/negative status
+SAA_contingency_table <- table(SAA_results$clust, SAA_results$SAA_Status)
+print(SAA_contingency_table)
+
+# performs the Chi-Squared test
+chisq.test(SAA_contingency_table)
+```
+
+
+
+
+```{r}
+# visualizes and tests for differences in mean TTT 150h by clust
+
+ggplot(SAA_results, aes(x = clust, y = mean_TTT_150h, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + labs(x = "Cluster", y = "Mean TTT (Hours)") + theme(legend.position = "none") + theme_bw()
+
+# performs kruskal test to get significance of mean TTT 150h differences across clusters.
+kruskal.test(mean_TTT_150h ~ clust, SAA_results)
+```
+
+
+```{r}
+# visualizes and tests for differences in mean T50 150h by clust
+
+ggplot(SAA_results, aes(x = clust, y = mean_T50_150h, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + labs(x = "Cluster", y = "Mean T50 (Hours)") + theme(legend.position = "none") + theme_bw()
+
+# performs kruskal test to get significance of mean T50 150h differences across clusters.
+kruskal.test(mean_T50_150h ~ clust, SAA_results)
+```
+
+```{r}
+# visualizes and tests for differences in mean AUC 150h by clust
+
+ggplot(SAA_results, aes(x = clust, y = mean_AUC_150h, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + labs(x = "Cluster", y = "Mean AUC (Fluorescence Across Time)") + theme(legend.position = "none") + theme_bw()
+
+# performs kruskal test to get significance of mean AUC 150h differences across clusters.
+kruskal.test(mean_AUC_150h ~ clust, SAA_results)
+```
+
+
+
+#### The following code blocks test for differences in NULISA measurements across clusters.
+
+```{r}
+# sets the names of the files with relevant NULISA data
+# the first item in the vector specifies the file name (in the "main_directory")
+# the second item in the vector specifies the sheet number
+NULISA_CSF_CNS_file <- c("Proteomic_Analysis/PPMI_Project_282_NULISAseq_CNSDiseasePanel_NPQCounts_20260120.xlsx", 1)
+NULISA_CSF_inflammation_file <- c("Proteomic_Analysis/PPMI_Project_282_NULISAseq_Inflamation_Panel_NPQCounts_20260120.xlsx", 1)
+NULISA_plasma_CNS_file <- c("Proteomic_Analysis/PPMI-288-P-000671-NULISA-20250828rev.xlsx", 5)
+NULISA_plasma_inflammation_file <- c("Proteomic_Analysis/PPMI-288-P-000671-NULISA-20250828rev.xlsx", 2)
+
+# sets the desired file with data to consider in the analysis
+NULISA_file <- NULISA_plasma_CNS_file
+```
+
+
+```{r, warning = F}
+# handles NULISA data from the plasma files (with a different format from the CSF files)
+if(NULISA_file[1] %in% c(NULISA_plasma_CNS_file[1], NULISA_plasma_inflammation_file[1])){
+    # filters to participants with a cluster assignment, passed QC, and with baseline data
+    NULISA <- read_excel(file.path(main_directory,  NULISA_file[1]), sheet = as.numeric(NULISA_file[2])) %>% dplyr::filter(SampleQC == "PASS" & EVENT_ID == "BL" & PATNO %in%         cases_with_selected_omics_data) %>% arrange(PATNO) %>%
+                                                 mutate(clust = case_when(PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 1]
+                                                      ~ 1,
+                                                  PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 2]
+                                                      ~ 2,
+                                                  PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 3]
+                                                      ~ 3))
+  
+} else {
+    # otherwise gets data frame of NULISA results from the CNS or inflammation panel
+    # filters to participants with a cluster assignment, passed QC, and with baseline data
+    NULISA <- read_excel(file.path(main_directory,  NULISA_file[1]), sheet = as.numeric(NULISA_file[2])) %>% dplyr::filter(SampleQC == "passed" & CLINICAL_EVENT == "BL" & PATNO %in% cases_with_selected_omics_data) %>% arrange(PATNO) %>%
+                                                 mutate(clust = case_when(PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 1]
+                                                      ~ 1,
+                                                  PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 2]
+                                                      ~ 2,
+                                                  PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 3]
+                                                      ~ 3))
+}
+```
+
+```{r}
+# gets list of targets in the NULISA data
+unique(NULISA$Target)
+```
+
+```{r}
+# optional code block to filter out participants with more than one sample 
+# gets participants with more than one measurement per target
+NULISA_duplicated_PATNOs <- unique((NULISA %>% dplyr::select(PATNO, Target, NPQ) |>
+  dplyr::summarise(n = dplyr::n(), .by = c(PATNO, Target)) |>
+  dplyr::filter(n > 1L))$PATNO)
+NULISA_duplicated_PATNOs
+
+# filters to only participants with at most one measurement per target
+NULISA <- NULISA %>% dplyr::filter(!(PATNO %in% NULISA_duplicated_PATNOs))
+```
+
+```{r}
+# gets number of participants in the remaining NULISA data by cluster
+length(unique((NULISA %>% dplyr::filter(clust == 1))$PATNO))
+length(unique((NULISA %>% dplyr::filter(clust == 2))$PATNO))
+length(unique((NULISA %>% dplyr::filter(clust == 3))$PATNO))
+length(unique((NULISA)$PATNO))
+```
+
+
+```{r}
+# creates pca object based on the NULISA NPQ values
+NULISA_PCA <- prcomp(NULISA %>% dplyr::select(PATNO, Target, NPQ) %>% pivot_wider(id_cols = PATNO, names_from = Target, values_from = NPQ) %>% column_to_rownames("PATNO") %>% dplyr::select(where(~ !all(is.na(.)))), center = T, scale = T)
+
+# gets the cluster assignments corresponding to participants in the PCA
+NULISA_PCA_clusts <- sapply(row.names(NULISA_PCA$x), function(patno){
+                                                  case_when(patno %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 1]
+                                                      ~ 1,
+                                                  patno %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 2]
+                                                      ~ 2,
+                                                  patno %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 3]
+                                                      ~ 3)})
+
+# plots the PCA based on PCs 1 and 2 and colored by cluster
+ggplot(NULISA_PCA$x, aes(x = PC1, y = PC2, color = as.factor(NULISA_PCA_clusts))) + geom_point() + scale_color_manual(values = cluster_colors)
+```
+
+```{r}
+# shows the most extreme outliers and creates a list of outliers to remove
+sort(NULISA_PCA$x[,1])
+#sort(NULISA_PCA$x[,2])
+NULISA_PCA_outliers_to_remove = c()
+#NULISA_PCA_outliers_to_remove = c("3333", "4108", "3808")
+```
+
+
+```{r}
+# sets a target from the NULISA data to analyze across clusters
+NULISA_Target_to_analyze <- "Oligo-SNCA"
+
+# gets the NULISA data filtered to measurements of the specified target
+NULISA_Data_filtered_to_target <- NULISA %>% dplyr::filter(Target == NULISA_Target_to_analyze, !(PATNO %in% NULISA_PCA_outliers_to_remove))
+
+# for reference, prints numbers of participants with the target NULISA data
+# per cluster, overall, and without considering duplicated entries
+table(NULISA_Data_filtered_to_target$clust)
+length(NULISA_Data_filtered_to_target$PATNO)
+length(unique(NULISA_Data_filtered_to_target$PATNO))
+
+# creates ggplot of the target NULISA measurements by cluster
+ggplot(NULISA_Data_filtered_to_target, aes(x = as.factor(clust), y = NPQ, fill = as.factor(clust))) + scale_fill_manual(values = cluster_colors) + labs(title = NULISA_Target_to_analyze, x = "Cluster", y = "NULISA Protein Quantification") + geom_boxplot() + theme(legend.position = "none")
+
+# performs Kruskal-Wallis test on the target NULISA data by cluster
+kruskal.test(NPQ ~ as.factor(clust), NULISA_Data_filtered_to_target)
+```
+
+
+```{r}
+# gets a table with the NULISA NPQ data for each participant after QC and with cluster grouping
+NULISA_NPQ_table <- NULISA %>% dplyr::select(PATNO, Target, NPQ) %>% pivot_wider(id_cols = PATNO, names_from = Target, values_from = NPQ) %>% column_to_rownames("PATNO") %>% dplyr::select(where(~ !all(is.na(.)))) %>% dplyr::filter(!(row.names(.) %in% NULISA_PCA_outliers_to_remove)) %>% mutate(clust_grouping =                                                                                                                        sapply(row.names(.), function(patno){
+                                                  case_when(patno %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 1]
+                                                      ~ 1,
+                                                  patno %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters %in% c(2,3)]
+                                                      ~ 2)}))
+
+# calculates the p values and log fold change across cluster groupings for each target
+NULISA_NPQ_p_vals_and_lfc <- as.data.frame(t(sapply(colnames(NULISA_NPQ_table %>% dplyr::select(-clust_grouping)), function(target){
+    group_1_values <- NULISA_NPQ_table[[target]][NULISA_NPQ_table$clust_grouping == 1]
+    group_2_values <- NULISA_NPQ_table[[target]][NULISA_NPQ_table$clust_grouping == 2]
+    c(pval = wilcox.test(group_1_values, group_2_values)$p.value,
+      lfc = log2((mean(group_2_values) / mean(group_1_values))))
+})))
+
+# gets the adjusted p values with the BH method
+NULISA_NPQ_p_vals_and_lfc$adj_pval <- p.adjust(NULISA_NPQ_p_vals_and_lfc$pval, method = "BH")
+
+# gets a boolean value for whether each target has a significant adjusted p value
+NULISA_NPQ_p_vals_and_lfc$is_sig <- NULISA_NPQ_p_vals_and_lfc$adj_pval < 0.05
+
+# plots a volcano plot of the data
+ggplot(NULISA_NPQ_p_vals_and_lfc, aes(x = lfc, y = -log10(pval), color = is_sig)) + geom_point() + labs(x = "Log Fold Change", color = "Is Significant?")
+
+# shows the results for each target sorted by increasing p value
+NULISA_NPQ_p_vals_and_lfc %>% arrange(pval)
+
+# gets data frame with the results that are significantly upregulated or downregulated in group 2 relative to group 1.
+NULISA_upreg_in_group_2 <- NULISA_NPQ_p_vals_and_lfc %>% arrange(pval) %>% dplyr::filter(is_sig & lfc > 0) %>% dplyr::select(adj_pval)
+NULISA_downreg_in_group_2 <- NULISA_NPQ_p_vals_and_lfc %>% arrange(pval) %>% dplyr::filter(is_sig & lfc < 0) %>% dplyr::select(adj_pval)
+```
+
+
+```{r}
+# this code block performs a correlation analysis on the data from the CNS disease panel in plasma vs CSF
+
+# gets the NULISA CNS data from plasma
+NULISA_plasma_CNS <- read_excel(file.path(main_directory,  NULISA_plasma_CNS_file[1]), sheet = as.numeric(NULISA_plasma_CNS_file[2])) %>% dplyr::filter(SampleQC == "PASS" & EVENT_ID == "BL" & PATNO %in% cases_with_selected_omics_data) %>% arrange(PATNO)
+
+# gets the NULISA CNS data from CSF
+NULISA_CSF_CNS <- read_excel(file.path(main_directory,  NULISA_CSF_CNS_file[1]), sheet = as.numeric(NULISA_CSF_CNS_file[2])) %>% dplyr::filter(SampleQC == "passed" & CLINICAL_EVENT == "BL" & PATNO %in% cases_with_selected_omics_data) %>% arrange(PATNO)
+
+# prints the head of the data frames
+head(NULISA_plasma_CNS)
+head(NULISA_CSF_CNS)
+
+# gets participants with more than one measurement per target (CSF)
+NULISA_CSF_CNS_duplicated_PATNOs <- unique((NULISA_CSF_CNS %>% dplyr::select(PATNO, Target, NPQ) |>
+  dplyr::summarise(n = dplyr::n(), .by = c(PATNO, Target)) |>
+  dplyr::filter(n > 1L))$PATNO)
+NULISA_CSF_CNS_duplicated_PATNOs
+
+# filters to only participants with at most one measurement per target
+NULISA_CSF_CNS <- NULISA_CSF_CNS %>% dplyr::filter(!(PATNO %in% NULISA_CSF_CNS_duplicated_PATNOs))
+
+# gets participants with more than one measurement per target (plasma)
+NULISA_plasma_CNS_duplicated_PATNOs <- unique((NULISA_plasma_CNS %>% dplyr::select(PATNO, Target, NPQ) |>
+  dplyr::summarise(n = dplyr::n(), .by = c(PATNO, Target)) |>
+  dplyr::filter(n > 1L))$PATNO)
+NULISA_plasma_CNS_duplicated_PATNOs
+
+# filters to only participants with at most one measurement per target
+NULISA_plasma_CNS <- NULISA_plasma_CNS %>% dplyr::filter(!(PATNO %in% NULISA_plasma_CNS_duplicated_PATNOs))
+
+# gets the PATNOs that are in each data source and in common across the two data sources
+length(unique(NULISA_plasma_CNS$PATNO))
+length(unique(NULISA_CSF_CNS$PATNO))
+length(unique(NULISA_plasma_CNS$PATNO)[unique(NULISA_plasma_CNS$PATNO) %in% unique(NULISA_CSF_CNS$PATNO)])
+length(unique(NULISA_CSF_CNS$PATNO)[unique(NULISA_CSF_CNS$PATNO) %in% unique(NULISA_plasma_CNS$PATNO)])
+CSF_and_plasma_shared_PATNOs_NULISA_CNS <- unique(NULISA_CSF_CNS$PATNO)[unique(NULISA_CSF_CNS$PATNO) %in% unique(NULISA_plasma_CNS$PATNO)]
+
+# gets the targets that are in each data source and in common across the two data sources
+length(unique(NULISA_plasma_CNS$Target))
+length(unique(NULISA_CSF_CNS$Target))
+length(unique(NULISA_plasma_CNS$Target)[unique(NULISA_plasma_CNS$Target) %in% unique(NULISA_CSF_CNS$Target)])
+length(unique(NULISA_CSF_CNS$Target)[unique(NULISA_CSF_CNS$Target) %in% unique(NULISA_plasma_CNS$Target)])
+CSF_and_plasma_shared_targets_NULISA_CNS <- unique(NULISA_CSF_CNS$Target)[unique(NULISA_CSF_CNS$Target) %in% unique(NULISA_plasma_CNS$Target)]
+
+# loops through the shared targets to evaluate correlations across data sources
+NULISA_CSF_plasma_cor_test <- sapply(CSF_and_plasma_shared_targets_NULISA_CNS, function(target){
+  
+    # filters to the desired target
+    NULISA_plasma_CNS_for_target <- NULISA_plasma_CNS %>% dplyr::filter(Target == target)
+    NULISA_CSF_CNS_for_target <- NULISA_CSF_CNS %>% dplyr::filter(Target == target)
+    
+    # filters to common PATNOs
+    NULISA_plasma_CNS_for_target <- NULISA_plasma_CNS_for_target %>% dplyr::filter(PATNO %in% NULISA_CSF_CNS_for_target$PATNO)
+    NULISA_CSF_CNS_for_target <- NULISA_CSF_CNS_for_target %>% dplyr::filter(PATNO %in% NULISA_plasma_CNS_for_target$PATNO)
+    
+    # returns early with message if the PATNOs are not consistent across data sources
+    if(!all(NULISA_plasma_CNS_for_target$PATNO == NULISA_CSF_CNS_for_target$PATNO)){
+        return ("mismatch of PATNOs")
+    }
+    
+    # returns NA if all measurements from the target are NA
+    if(all(is.na(NULISA_CSF_CNS_for_target$NPQ)) | all(is.na(NULISA_plasma_CNS_for_target$NPQ))){
+        return (NA)
+    }
+    
+    # performs a correlation test and returns the cor estimate and p value for the target
+    c(cor.test(NULISA_CSF_CNS_for_target$NPQ, NULISA_plasma_CNS_for_target$NPQ, method = "pearson")$estimate, 
+      cor.test(NULISA_CSF_CNS_for_target$NPQ, NULISA_plasma_CNS_for_target$NPQ, method = "pearson")$p.value)
+})
+                 
+
+NULISA_CSF_plasma_cor_test                                                     
+                                                                          
+```
+
+```{r}
+# formats the correlation test data as a data frame and names the columns
+NULISA_CSF_plasma_cor_test <- as.data.frame(t(as.data.frame(NULISA_CSF_plasma_cor_test)))
+colnames(NULISA_CSF_plasma_cor_test) <- c("Correlation_estimate", "p_val")
+
+# calculates the adjusted p-value and the nlog10 of the adjusted p-value
+NULISA_CSF_plasma_cor_test$adj_pval <- p.adjust(NULISA_CSF_plasma_cor_test$p_val, method = "BH")
+NULISA_CSF_plasma_cor_test$nlog10_adj_pval <- -log10(NULISA_CSF_plasma_cor_test$adj_pval)
+
+# plots the results by the correlation estimate and the log adj p-value
+ggplot(NULISA_CSF_plasma_cor_test, aes(x = Correlation_estimate, y = nlog10_adj_pval, color = adj_pval < 0.05)) + geom_point()
+
+# prints the table of results in ascending and descending order by correlation estimate
+NULISA_CSF_plasma_cor_test %>% dplyr::arrange(Correlation_estimate)
+NULISA_CSF_plasma_cor_test %>% dplyr::arrange(-Correlation_estimate)
+```
+```{r}
+# this code block considers a specific target and prints a scatterplot to visualize the correlation across data sources.
+
+# filters to a specific target
+specific_target <- "APOE4"
+NULISA_plasma_CNS_for_specific_target <- NULISA_plasma_CNS %>% dplyr::filter(Target == specific_target)
+NULISA_CSF_CNS_for_specific_target <- NULISA_CSF_CNS %>% dplyr::filter(Target == specific_target)
+    
+# filters to common PATNOs across both data sources
+NULISA_plasma_CNS_for_specific_target <- NULISA_plasma_CNS_for_specific_target %>% dplyr::filter(PATNO %in% NULISA_CSF_CNS_for_specific_target$PATNO)
+NULISA_CSF_CNS_for_specific_target <- NULISA_CSF_CNS_for_specific_target %>% dplyr::filter(PATNO %in% NULISA_plasma_CNS_for_specific_target$PATNO)
+
+# ensures that all PATNOs match across data sources
+all(NULISA_plasma_CNS_for_specific_target$PATNO == NULISA_CSF_CNS_for_specific_target$PATNO)
+
+# plots a scatterplot to visualize the correlation across data sources
+plot(NULISA_plasma_CNS_for_specific_target$NPQ, NULISA_CSF_CNS_for_specific_target$NPQ, main = specific_target)
+
+# returns the correlation test data for the target
+NULISA_CSF_plasma_cor_test[gsub("-", ".", specific_target),]
+```
+
+```{r}
+# plots APOE4 results colored by APOE4 status
+ggplot(data.frame(APOE4_status = as.factor(sapply(NULISA_CSF_CNS_for_specific_target$PATNO, function (patno){(curated_data %>% dplyr::filter(PATNO == patno & EVENT_ID == "BL"))$APOE_e4})), Plasma_NULISA_Protein_Quantification = NULISA_plasma_CNS_for_specific_target$NPQ, CSF_NULISA_Protein_Quantification = NULISA_CSF_CNS_for_specific_target$NPQ), aes(x = Plasma_NULISA_Protein_Quantification, y = CSF_NULISA_Protein_Quantification, color = APOE4_status)) + geom_point()
+```
+
+
+#### The following code blocks test for differences in UPDRS scores by cluster and potential covariates using linear mixed-effects modeling.
+
+
+
+```{r}
+
+# sets the clustering information to come from the main analysis based on the multi-omics data
+LME_cluster_metadata = icluster_metadata_full_sporadic_cohort
+LME_cluster_results = icluster_results_full_sporadic_cohort
+```
+
+
+```{r}
+# sets up the RNA seq metadata to be able to use the relevant variables in the LME analysis
+RNAseq_metadata_for_LME <- overall_RNAseq_metadata %>% mutate(YEAR = case_when(Month == "M0" ~ 0, Month == "M12" ~ 1, Month == "M24" ~ 2, Month == "M36" ~ 3), PATNO.x = as.character(PATNO.x), mapping_rate_percent = multimapped_percent + uniquely_mapped_percent) %>% dplyr::select(PATNO.x, YEAR, RIN.Value.x, mapping_rate_percent) %>% dplyr::rename(PATNO = "PATNO.x")
+
+# gets RNA seq metadata for only baseline samples
+RNAseq_metadata_for_LME_BL_only <- RNAseq_metadata_for_LME %>% dplyr::filter(YEAR == 0) %>% dplyr::select(-c(YEAR))
+```
+
+
+```{r}
+# extracts potential covariates and updrs data to use in the linear mixed-effects models
+updrs_data_for_mixed_effects_model <- curated_data %>% dplyr::select(PATNO, SITE, updrs1_score, updrs2_score, updrs3_score, updrs4_score, updrs_totscore, YEAR, age_at_visit, SEX, agediag, LEDD) %>% mutate(taking_medication = LEDD > 0, disease_duration = age_at_visit - agediag)
+
+# finds the cluster assignment of each participant in the data
+updrs_data_for_mixed_effects_model <- updrs_data_for_mixed_effects_model %>% mutate(clust = 
+                                                         case_when(PATNO %in%
+                                                                   LME_cluster_metadata$PATNO[
+                                                                   LME_cluster_results$clusters == 1]
+                                                                    ~ 1,
+                                                                   PATNO %in%
+                                                                   LME_cluster_metadata$PATNO[
+                                                                   LME_cluster_results$clusters == 2]
+                                                                    ~ 2,
+                                                                   PATNO %in%
+                                                                   LME_cluster_metadata$PATNO[
+                                                                   LME_cluster_results$clusters == 3]
+                                                                    ~ 3,
+                                                                   TRUE ~ 0)) # cluster 0 is given to label results that are not clustered
+
+# prints the total number of items by cluster
+table(updrs_data_for_mixed_effects_model$clust)
+
+# filters to years 0 - 3 after baseline with a cluster assignment
+updrs_data_for_mixed_effects_model <- updrs_data_for_mixed_effects_model %>% dplyr::filter(clust != 0 & YEAR %in% c(0, 1, 2, 3))
+
+# checks the dimensions of the data
+dim(updrs_data_for_mixed_effects_model)
+
+# adds polygenic risk score and genetic PCs to the data for LME analysis
+updrs_data_for_mixed_effects_model <- updrs_data_for_mixed_effects_model %>% left_join(dplyr::select(genetic_overview_information, PATNO, Genetic_PRS_PRSp90, Genetic_PRS_PC1, Genetic_PRS_PC2, Genetic_PRS_PC3) %>% mutate(PATNO = as.character(PATNO)), by = "PATNO")
+
+# adds relevant RNAseq metadata to the data frame for LME analysis
+
+# with only baseline RNAseq data to reflect how clusters are derived from the baseline data
+updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data <- updrs_data_for_mixed_effects_model %>% left_join(RNAseq_metadata_for_LME_BL_only, by = "PATNO")
+
+# with RNAseq metadata from each year for expanded analysis beyond the baseline
+updrs_data_for_mixed_effects_model <- updrs_data_for_mixed_effects_model %>% left_join(RNAseq_metadata_for_LME, by = c("PATNO", "YEAR"))
+
+# checks the dimensions of the data again
+dim(updrs_data_for_mixed_effects_model)
+
+
+# prints the number of results by cluster
+table(updrs_data_for_mixed_effects_model$clust)
+
+# prints the number of results by cluster and year
+table(updrs_data_for_mixed_effects_model$YEAR, updrs_data_for_mixed_effects_model$clust)
+```
+
+
+```{r}
+# plots the UPDRS total score by cluster and year for each participant
+ggplot(updrs_data_for_mixed_effects_model, aes(x = YEAR, y = updrs_totscore, group = PATNO, color = as.factor(clust))) + geom_line() + labs(title = "UPDRS Total Score by Cluster and Year for Each Participant", color = "Cluster") + scale_color_manual(values = cluster_colors)
+
+# plots the UPDRS total score by cluster and sex at year 0 for each participant
+# credit to https://r-graph-gallery.com/265-grouped-boxplot-with-ggplot2.html
+# for help with this code
+sapply(c(0:3), function(year){ggplot(updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == year), aes(x = as.factor(clust), y = updrs_totscore, fill = as.factor(SEX))) + geom_boxplot() + labs(title = paste0("UPDRS Total Score by Cluster and Sex at Year ", year, " for Each Participant"), fill = "Sex", x = "Cluster")})
+
+# plots the UPDRS total score by cluster and age at visit for each participant
+ggplot(updrs_data_for_mixed_effects_model, aes(x = age_at_visit, y = updrs_totscore, group = PATNO, color = as.factor(clust))) + geom_line() + labs(title = "UPDRS Total Score by Cluster and Age at Visit for Each Participant", color = "Cluster") + scale_color_manual(values = cluster_colors)
+
+# plots the UPDRS total score by cluster and disease duration for each participant
+ggplot(updrs_data_for_mixed_effects_model, aes(x = disease_duration, y = updrs_totscore, group = PATNO, color = as.factor(clust))) + geom_line() + labs(title = "UPDRS Total Score by Cluster and Disease Duration at Visit for Each Participant", color = "Cluster") + scale_color_manual(values = cluster_colors)
+
+
+```
+
+```{r}
+# plots the RIN values by cluster across years for each participant
+# credit to https://r-graph-gallery.com/265-grouped-boxplot-with-ggplot2.html
+# for help with this code
+ggplot(updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0), aes(x = as.factor(clust), y = RIN.Value.x, fill = as.factor(clust))) + geom_boxplot() + labs(title = "RIN Values by Cluster at Year 0", x = "Cluster") + theme(legend.position = "none") + scale_fill_manual(values = cluster_colors)
+ggplot(updrs_data_for_mixed_effects_model, aes(x = as.factor(YEAR), y = RIN.Value.x, fill = as.factor(clust))) + geom_boxplot() + labs(title = "RIN Values by Cluster Across Years", x = "Year", fill = "Cluster") + scale_fill_manual(values = cluster_colors)
+kruskal.test(RIN.Value.x ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))
+kruskal.test(RIN.Value.x ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 1))
+kruskal.test(RIN.Value.x ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 2))
+kruskal.test(RIN.Value.x ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 3))
+```
+
+
+```{r}
+# plots the mapping rate percent by cluster across years for each participant
+# credit to https://r-graph-gallery.com/265-grouped-boxplot-with-ggplot2.html
+# for help with this code
+ggplot(updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0), aes(x = as.factor(clust), y = mapping_rate_percent, fill = as.factor(clust))) + geom_boxplot() + labs(title = "Mapping Rate Percent by Cluster at Year 0", x = "Cluster") + theme(legend.position = "none") + scale_fill_manual(values = cluster_colors)
+ggplot(updrs_data_for_mixed_effects_model, aes(x = as.factor(YEAR), y = mapping_rate_percent, fill = as.factor(clust))) + geom_boxplot() + labs(title = "Mapping Rate Percent by Cluster Across Years", x = "Year", fill = "Cluster") + scale_fill_manual(values = cluster_colors)
+kruskal.test(mapping_rate_percent ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))
+kruskal.test(mapping_rate_percent ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 1))
+kruskal.test(mapping_rate_percent ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 2))
+kruskal.test(mapping_rate_percent ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 3))
+```
+
+
+
+
+
+```{r}
+# finds number of samples at baseline by cluster overall and with RIN < 5
+table((updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))$clust)
+table((updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0 & RIN.Value.x < 5))$clust)
+```
+
+
+
+```{r}
+# performs wilcox tests on the UPDRS scores by sex at year 0 across all clusters
+wilcox.test((updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0 & SEX == 0))$updrs_totscore, (updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0 & SEX == 1))$updrs_totscore)$p.value
+
+# performs wilcox tests on the UPDRS scores by sex at year 0 within each cluster
+sapply(c(1:3), function(cluster){wilcox.test((updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0 & clust == cluster & SEX == 0))$updrs_totscore, (updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0 & clust == cluster & SEX == 1))$updrs_totscore)$p.value})
+
+# creates a table of sex by cluster and performs a chi-squared test to identify any statistical significant relationship between sex and cluster
+table_of_sex_by_cluster <- table((updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))$clust, (updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))$SEX)
+table_of_sex_by_cluster
+chisq.test(table_of_sex_by_cluster)
+
+```
+
+```{r}
+
+# performs kruskal test on the UPDRS scores by site at each year across all clusters
+sapply(c(0:3), function(year){ggplot(updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == year), aes(x = as.factor(SITE), y = updrs_totscore)) + geom_boxplot() + labs(title = paste0("Data from year ", year), x = "Site Number")})
+
+
+# performs kruskal test on the UPDRS scores by site at each year across all clusters
+sapply(c(0:3), function(year){kruskal.test(updrs_totscore ~ SITE, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == year))$p.value})
+
+# creates a table of site by cluster at year 0 and uses fisher exact test to test for differences
+table_of_site_by_cluster <- table((updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))$clust, (updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))$SITE)
+table_of_site_by_cluster
+# credit to https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/fisher.test
+# for help with this code
+fisher.test(table_of_site_by_cluster, simulate.p.value = TRUE)
+
+```
+
+
+```{r}
+# tests the PRS and top 3 genomic PCs for differences by cluster
+ggplot(updrs_data_for_mixed_effects_model, aes(x = as.factor(clust), y = Genetic_PRS_PRSp90, fill = as.factor(clust))) + geom_boxplot() + labs(title = "Polygenic Risk Score (PRSp90) by Cluster", x = "Cluster") + theme(legend.position = "none") + scale_fill_manual(values = cluster_colors)
+pairwise.wilcox.test(updrs_data_for_mixed_effects_model$Genetic_PRS_PRSp90, as.factor(updrs_data_for_mixed_effects_model$clust))
+kruskal.test(Genetic_PRS_PRSp90 ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))
+kruskal.test(Genetic_PRS_PC1 ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))
+kruskal.test(Genetic_PRS_PC2 ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))
+kruskal.test(Genetic_PRS_PC3 ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))
+```
+
+
+
+```{r}
+# plots the UPDRS total scores by cluster and age
+ggplot(updrs_data_for_mixed_effects_model, aes(x = age_at_visit, y = updrs_totscore, group = as.factor(clust), color = as.factor(clust))) + geom_point() + labs(title = "UPDRS Total Scores by Cluster and Age at Visit", color = "Cluster") + scale_color_manual(values = cluster_colors)
+
+# plots the UPDRS total scores by cluster and disease duration
+ggplot(updrs_data_for_mixed_effects_model, aes(x = disease_duration, y = updrs_totscore, group = as.factor(clust), color = as.factor(clust))) + geom_point() + labs(title = "UPDRS Total Scores by Cluster and Disease Duration", color = "Cluster") + scale_color_manual(values = cluster_colors)
+
+# plots age at visit by cluster at baseline and tests for differences
+ggplot(updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0), aes(x = as.factor(clust), y = age_at_visit, fill = as.factor(clust))) + geom_boxplot() + labs(title = "Age at Visit by Cluster at Baseline") + scale_fill_manual(values = cluster_colors)
+summary(aov(age_at_visit ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0)))
+kruskal.test(age_at_visit ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))$p.value
+
+# plots disease duration by cluster at baseline and tests for differences
+ggplot(updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0), aes(x = as.factor(clust), y = disease_duration, fill = as.factor(clust))) + geom_boxplot() + labs(title = "Disease Duration by Cluster at Baseline") + scale_fill_manual(values = cluster_colors)
+summary(aov(disease_duration ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0)))
+kruskal.test(disease_duration ~ clust, updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == 0))$p.value
+```
+
+```{r}
+# finds the median UPDRS total score by cluster and year
+updrs_data_for_mixed_effects_model_with_clust_medians <- updrs_data_for_mixed_effects_model %>% group_by(clust, YEAR) %>% summarize(clust_median_updrs_totscore = median(updrs_totscore, na.rm=T), clust_fraction_taking_medication = mean(taking_medication, na.rm=T)) %>% ungroup()
+
+# plots the median UPDRS total score by cluster and year
+ggplot(updrs_data_for_mixed_effects_model_with_clust_medians, aes(x = YEAR, y = clust_median_updrs_totscore, group = as.factor(clust), color = as.factor(clust))) + geom_line(linewidth = 3) + labs(title = "Median UPDRS Total Score by Cluster and Year", color = "Cluster") + scale_color_manual(values = cluster_colors)
+
+# plots the fraction of participants taking medication by cluster and year
+ggplot(updrs_data_for_mixed_effects_model_with_clust_medians, aes(x = YEAR, y = clust_fraction_taking_medication, group = as.factor(clust), color = as.factor(clust))) + geom_line(linewidth = 3) + labs(title = "Fraction of Participants Taking Medication by Cluster and Year", color = "Cluster") + scale_color_manual(values = cluster_colors)
+
+# This code performs a chi-squared test on the numbers of participants taking and not taking medication each 
+# year by cluster to determine if the differences are statistically significant.
+# Year 0 is not included because there are too few participants taking medication to satisfy the assumptions of 
+# the chi-squared test.
+sapply(c(1:3), function(year){chisq.test(table((updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == year))$clust, (updrs_data_for_mixed_effects_model %>% dplyr::filter(YEAR == year))$taking_medication))$p.value})
+```
+
+```{r}
+# creates the linear mixed effects model
+# uses only baseline RNA seq data because only baseline transcriptomic data contributed to clustering
+updrs_totscore_lmer <- lmer(updrs_totscore ~ YEAR + age_at_visit + disease_duration + as.factor(taking_medication) + as.factor(SEX) + Genetic_PRS_PRSp90 + Genetic_PRS_PC1 + Genetic_PRS_PC2 + Genetic_PRS_PC3 + RIN.Value.x + mapping_rate_percent + as.factor(clust) + (1 + YEAR | PATNO), data = updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data)
+
+# checks for approximate linear relationships between UPDRS total scores and covariates
+plot(updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$YEAR, updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$updrs_totscore)
+plot(updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$age_at_visit, updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$updrs_totscore)
+plot(updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$disease_duration, updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$updrs_totscore)
+plot(updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$Genetic_PRS_PRSp90, updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$updrs_totscore)
+plot(updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$RIN.Value.x, updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$updrs_totscore)
+plot(updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$mapping_rate_percent, updrs_data_for_mixed_effects_model_with_only_BL_RNAseq_data$updrs_totscore)
+
+
+# checks the normality of residuals assumption of linear mixed effects modeling
+qqnorm(resid(updrs_totscore_lmer), main = "Normal Q-Q Plot - UPDRS Total Score Residuals")
+hist(resid(updrs_totscore_lmer), main = "UPDRS Total Score Residuals")
+```
+
+```{r}
+# prints key results of the linear mixed effects modeling
+summary(updrs_totscore_lmer)
+```
+

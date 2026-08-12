@@ -1,0 +1,471 @@
+---
+title: "PPMI Transcriptomic GSEA"
+author: "Andrew Gumbert"
+date: "September 2025 - April 2026"
+output: html_document
+---
+
+Description:
+
+This file takes two vectors of participant ids as input in order to specify two groups to compare. The file performs differential expression of transcriptomic data across the two groups. Given the ranked differentially expressed genes across the two groups, the file performs gene set enrichment analysis with the gseGO function from the clusterProfiler package. The file then visualizes the results to indicate the most differentially expressed gene sets across the groups. 
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+# loads required libraries
+# credit to https://learn.gencore.bio.nyu.edu/rna-seq-analysis/over-representation-analysis/
+# for help with this code.
+library(clusterProfiler)
+library(DESeq2)
+library(wordcloud)
+library("org.Hs.eg.db", character.only = TRUE)
+library(enrichplot)
+library(AnnotationDbi)
+library(rstatix)
+library("EnsDb.Hsapiens.v86")
+library(immunedeconv)
+```
+
+```{r}
+main_directory <- "/Users/Andrew/Desktop/PPMI_Data_Files"
+```
+
+```{r}
+# sets the two groups to compare for differential expression throughout this analysis.
+group_1_to_compare = cases_with_selected_omics_data[icluster_results_full_sporadic_cohort$clusters == 1]
+group_2_to_compare = cases_with_selected_omics_data[icluster_results_full_sporadic_cohort$clusters %in% c(2, 3)]
+```
+
+```{r}
+# sets the two groups to compare for differential expression throughout this analysis.
+# this code block filters to only transcriptomic samples that have viable QC metrics
+group_1_to_compare = cases_with_selected_omics_data[icluster_results_full_sporadic_cohort$clusters == 1 & cases_with_selected_omics_data %in% row.names(transcriptomic_exp_for_clustering_full_sporadic_cohort)]
+group_2_to_compare = cases_with_selected_omics_data[icluster_results_full_sporadic_cohort$clusters %in% c(2, 3) & cases_with_selected_omics_data %in% row.names(transcriptomic_exp_for_clustering_full_sporadic_cohort)]
+```
+
+```{r}
+# verifies no participants are in both group 1 and group 2
+sum(group_1_to_compare %in% group_2_to_compare) == 0
+```
+
+## The following code blocks run GSEA with the gseGO function on the two specified groups of participants
+
+### The following code loads the metadata files and processes them to produce a cleaned data frame of the combined metadata.
+
+```{r}
+
+# Takes in the metadata files for RNAseq and sample metadata
+# This file is from https://ida.loni.usc.edu/pages/access/geneticData.jsp
+RNAseq_metadata <- read.csv(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/metaDataIR3.csv"))
+# This file is from https://ida.loni.usc.edu/web/ppmi-rnaseq-app#Accessdata
+sample_metadata <- read.csv(file.path(main_directory, "meta_data.11192021.csv"))
+
+# Checks dimensions and the number of unique samples in the metadata (should be the same)
+dim(RNAseq_metadata)
+length(unique(RNAseq_metadata$HudAlphaID))
+dim(sample_metadata)
+length(unique(sample_metadata$HudAlphaSampleName))
+
+# joins the two metadata files and removes old files
+RNAseq_metadata <- dplyr::rename(RNAseq_metadata, HudAlphaSampleName = "HudAlphaID")
+joined_metadata <- inner_join(RNAseq_metadata, sample_metadata, by = "HudAlphaSampleName")
+rm(RNAseq_metadata, sample_metadata)
+
+# checks the dimensions of joined metadata compared to unique samples (should be the same)
+dim(joined_metadata)
+length(unique(joined_metadata$HudAlphaSampleName))
+
+# stores the metadata filtered to only include samples that passed quality control
+quality_metadata <- joined_metadata %>% dplyr::filter(QCflagIR3 == "pass")
+
+
+dim(quality_metadata)
+
+# joins genomic data to the RNAseq data in case downstream analyses consider the genomic data
+genetic_metadata <- read.csv(file.path(main_directory, "iu_genetic_consensus_20250515_18Jul2025.csv"))
+genetic_metadata <- genetic_metadata %>% dplyr::rename("PATNO.x" = PATNO)
+overall_RNAseq_metadata <- left_join(quality_metadata, genetic_metadata, by = "PATNO.x")
+
+dim(overall_RNAseq_metadata)
+```
+
+
+### This code block creates the gene expression count matrix for the two groups to compare
+
+```{r}
+# Gets just the relevant filtered sample IDs from baseline to use in setting up the counts matrix
+filtered_sample_ids_bl <- sapply(sort(c(group_1_to_compare, group_2_to_compare)), function(patient_id) {(overall_RNAseq_metadata %>% dplyr::filter(PATNO.x == patient_id & Month == "M0"))$HudAlphaSampleName})
+
+# Gets the label names for each gene from the first gene quanitification file
+# Credit to https://stackoverflow.com/questions/42819131/read-tab-delimited-text-file
+# for help with processing tab deliminations 
+gene_names <- read.table(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant/PPMI-Phase1-IR3.1009.POOL.0003202425.5104-SL-0095.longRNA-NEBKAP.salmon.genes.sf"), sep = "\t", header=T)$Name
+
+# creates data frame to store the expression matrix
+tran_expression_counts_bl <- data.frame(gene_names)
+
+# counter to help track progress of loop (see below)
+counter = 0
+
+# Fills the expression matrix with the data from each genomic file
+# Credit to https://stackoverflow.com/questions/14958516/read-all-files-in-directory-and-apply-multiple-functions-to-each-data-frame
+# for help with accessing all files in a directory
+# Credit to https://cran.r-project.org/web/packages/stringr/vignettes/regular-expressions.html
+# for help with regular expressions
+# Credit to https://www.dataquest.io/blog/add-column-to-dataframe-in-r/
+# for help with manipulating data frames
+# Credit to https://www.w3schools.com/r/r_for_loop.asp
+# for help with setting up the for loop
+gene_files <- list.files(path = file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant"), pattern = "*.genes.sf")
+for (x in gene_files){
+    # determines if the file corresponds to filtered PD samples
+    if(str_extract(x, "5104-SL-....") %in% filtered_sample_ids_bl){
+      
+        # adds the data from the file to the expression matrix.
+        tran_expression_counts_bl[str_extract(x, "5104-SL-....")] <- read.table(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant/", x), sep = "\t", header=T)$NumReads
+        
+        # keeps track of counter and prints at every 100 counts
+        counter <- counter + 1
+        if (counter %% 100 == 0){
+            print(counter)
+        }
+    }
+}
+
+# puts gene names as the row names
+tran_expression_counts_bl <- column_to_rownames(tran_expression_counts_bl, "gene_names")
+
+# sets the column names to be participant ids rather than sample ids
+colnames(tran_expression_counts_bl) <- sapply(colnames(tran_expression_counts_bl), function(sample_id){(overall_RNAseq_metadata %>% dplyr::filter(HudAlphaSampleName == sample_id))$PATNO.x})
+
+# orders the columns by ascending participant ids and rows by ascending Ensembl IDs
+# Credit to https://stackoverflow.com/questions/29873293/dplyr-order-columns-alphabetically-in-r
+# for help with this step
+tran_expression_counts_bl <- tran_expression_counts_bl %>% dplyr::select(order(colnames(.))) %>% dplyr::arrange(row.names(.))
+```
+
+
+
+```{r}
+# gets summary table with the numbers of participants by group in total and with transcriptomic data
+data.frame(group = c("group 1", "group 2"), num_participants = c(length(group_1_to_compare), length(group_2_to_compare)), num_with_tran_data = c(sum(colnames(tran_expression_counts_bl) %in% group_1_to_compare), sum(colnames(tran_expression_counts_bl) %in% group_2_to_compare)))
+```
+
+
+### This code block creates a DESeq object with the metadata and expression counts.
+
+```{r}
+
+# sets up metadata file with cluster assignments of each patient
+tran_DE_metadata_bl <- data.frame(participant_id = colnames(tran_expression_counts_bl))
+tran_DE_metadata_bl$group <- as.factor(sapply(tran_DE_metadata_bl$participant_id, function(id){
+                                              if(id %in% group_1_to_compare){return("1")}
+                                              if(id %in% group_2_to_compare){return("2")}}))
+tran_DE_metadata_bl <- column_to_rownames(tran_DE_metadata_bl, "participant_id")
+
+# Checks that rownames in metadata match column names in counts matrix
+# Credit to https://www.youtube.com/watch?v=OzNzO8qwwp0
+# for help with this step
+all(colnames(tran_expression_counts_bl) == rownames(tran_DE_metadata_bl))
+
+
+# Creates DESeq object with exp counts and metadata.
+# Credit to https://www.youtube.com/watch?v=OzNzO8qwwp0
+# for help with this step
+# Credit to https://support.bioconductor.org/p/133326/
+# for help with debugging
+GSEA_DES_obj_bl <- DESeqDataSetFromMatrix(countData = round(tran_expression_counts_bl),
+                                          colData = tran_DE_metadata_bl,
+                                          design = ~ group)
+```
+
+```{r}
+# filters out genes that have all zero expression values
+# credit to https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+# for help with this code
+nonzero_rows_bl <- rowSums(counts(GSEA_DES_obj_bl)) > 0
+GSEA_DES_obj_bl <- GSEA_DES_obj_bl[nonzero_rows_bl,]
+```
+
+
+### The following code blocks run differential expression analysis and compute the results
+
+```{r}
+# runs DESeq on the object and stores the results
+# credit to https://www.youtube.com/watch?v=OzNzO8qwwp0
+# for help with these steps
+
+# For the baseline data:
+GSEA_DES_obj_bl <- DESeq(GSEA_DES_obj_bl)
+DESeq_results_bl <- results(GSEA_DES_obj_bl)
+
+```
+
+
+```{r}
+# Creates volcano plot of differential expression analysis results
+# Credit to https://biostatsquid.com/volcano-plots-r-tutorial/
+# for help with this step.
+ggplot(DESeq_results_bl, aes(x = log2FoldChange, y = -log10(padj), col = (padj < 0.05 & !is.na(padj)))) + geom_point(size = 1)
+```
+
+
+
+```{r}
+# gets a ranking of the most downregulated genes based on log2fc
+downreg_ranked <- data.frame(gene_id = row.names(DESeq_results_bl) %>% substr(1,15),
+                            log2fc = DESeq_results_bl$log2FoldChange) %>% arrange(log2fc)
+
+# gets the downregulated genes and log2fc values in a named vector for gseGO
+downreg_ranked_vector <- -downreg_ranked$log2fc
+names(downreg_ranked_vector) <- downreg_ranked$gene_id
+
+# reverses the vector to get the ranked list of most upregulated genes 
+upreg_ranked_vector <- -rev(downreg_ranked_vector)
+
+# checks the heads and lengths of the up- and down- regulated ranked vectors
+length(upreg_ranked_vector)
+head(upreg_ranked_vector)
+length(downreg_ranked_vector)
+head(downreg_ranked_vector)
+```
+### OPTIONAL code block that will filter the results to only a set of selected transcriptomic features 
+
+```{r}
+# loads the selected transcriptomic features from "PPMI_Data_Exploration_Transcriptomics_based_on_UPDRS.Rmd"
+selected_tran_features <- read.table(file.path(main_directory, "selected_transcriptomic_features_from_UPDRS_A_vs_B.txt"))$V1
+upreg_ranked_vector <- upreg_ranked_vector[names(upreg_ranked_vector) %in% (selected_tran_features %>% substr(1,15))]
+length(upreg_ranked_vector)
+head(upreg_ranked_vector)
+```
+
+
+
+### The following code blocks run the Gene Set analysis and display the results
+
+```{r}
+
+set.seed(648)
+
+# runs the gsea analysis
+# credit to https://www.rdocumentation.org/packages/clusterProfiler/versions/3.0.4/topics/gseGO
+# for help with this code.
+gsea_results_upreg <- gseGO(geneList = upreg_ranked_vector,
+                            OrgDb = "org.Hs.eg.db",
+                            keyType = 'ENSEMBL',
+                            ont = "ALL")
+```
+
+
+
+
+```{r}
+# creates dot plots of the gsea results
+# credit to https://github.com/YuLab-SMU/DOSE/issues/20
+# for help with this code
+dotplot(gsea_results_upreg, x="NES", split = ".sign", font.size = 8, showCategory = 5) + facet_grid(~.sign) + ggtitle("All transcriptomic features - ALL terms")
+```
+
+
+```{r}
+# converts results to a data frame
+# credit to https://www.biostars.org/p/339493/
+# for help with this code
+as.data.frame(gsea_results_upreg)
+```
+
+
+
+
+
+
+
+
+## The following code blocks perform deconvolution analysis of cell types across groups 1 and 2
+
+
+```{r}
+# Gets just the relevant filtered sample IDs from baseline to use in setting up the counts matrix
+filtered_sample_ids_bl <- sapply(sort(c(group_1_to_compare, group_2_to_compare)), function(patient_id) {(overall_RNAseq_metadata %>% dplyr::filter(PATNO.x == patient_id & Month == "M0"))$HudAlphaSampleName})
+
+# Gets the label names for each gene from the first gene quanitification file
+# Credit to https://stackoverflow.com/questions/42819131/read-tab-delimited-text-file
+# for help with processing tab deliminations 
+gene_names <- read.table(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant/PPMI-Phase1-IR3.1009.POOL.0003202425.5104-SL-0095.longRNA-NEBKAP.salmon.genes.sf"), sep = "\t", header=T)$Name
+
+# creates data frame to store the TPM matrix
+tran_TPM_bl <- data.frame(gene_names)
+
+# counter to help track progress of loop (see below)
+counter = 0
+
+# Fills the expression matrix with the data from each genomic file
+# Credit to https://stackoverflow.com/questions/14958516/read-all-files-in-directory-and-apply-multiple-functions-to-each-data-frame
+# for help with accessing all files in a directory
+# Credit to https://cran.r-project.org/web/packages/stringr/vignettes/regular-expressions.html
+# for help with regular expressions
+# Credit to https://www.dataquest.io/blog/add-column-to-dataframe-in-r/
+# for help with manipulating data frames
+# Credit to https://www.w3schools.com/r/r_for_loop.asp
+# for help with setting up the for loop
+gene_files <- list.files(path = file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant"), pattern = "*.genes.sf")
+for (x in gene_files){
+    # determines if the file corresponds to filtered PD samples
+    if(str_extract(x, "5104-SL-....") %in% filtered_sample_ids_bl){
+      
+        # adds the data from the file to the expression matrix. USES TPM INSTEAD OF NUMREADS.
+        tran_TPM_bl[str_extract(x, "5104-SL-....")] <- read.table(file.path(main_directory, "PPMI_RNAseq_IR3_Analysis/quant/", x), sep = "\t", header=T)$TPM
+        
+        # keeps track of counter and prints at every 100 counts
+        counter <- counter + 1
+        if (counter %% 100 == 0){
+            print(counter)
+        }
+    }
+}
+
+# puts gene names as the row names
+tran_TPM_bl <- column_to_rownames(tran_TPM_bl, "gene_names")
+
+# sets the column names to be participant ids rather than sample ids
+colnames(tran_TPM_bl) <- sapply(colnames(tran_TPM_bl), function(sample_id){(overall_RNAseq_metadata %>% dplyr::filter(HudAlphaSampleName == sample_id))$PATNO.x})
+
+# orders the columns by ascending participant ids and rows by ascending Ensembl IDs
+# Credit to https://stackoverflow.com/questions/29873293/dplyr-order-columns-alphabetically-in-r
+# for help with this step
+tran_TPM_bl <- tran_TPM_bl %>% dplyr::select(order(colnames(.))) %>% dplyr::arrange(row.names(.))
+```
+
+
+
+
+
+```{r}
+
+# prints head of TPM matrix
+head(tran_TPM_bl)
+
+# adds gene symbols to matrix 
+# credit to https://support.bioconductor.org/p/9138389/
+# and https://support.bioconductor.org/p/130557/
+# for help with this method
+# credit to https://bioconductor.org/packages/stats/data-annotation/EnsDb.Hsapiens.v86
+# for the EnsDb.Hsapiens.v86 package
+tran_TPM_bl_with_symbol <- tran_TPM_bl
+tran_TPM_bl_with_symbol$symbol <- mapIds(EnsDb.Hsapiens.v86, keys = substr(row.names(tran_TPM_bl), 1, 15), column = "SYMBOL", keytype = "GENEID", multiVals = "first")
+
+# checks the number of symbols, NA symbols, and unique symbols
+length(tran_TPM_bl_with_symbol$symbol)
+length(!is.na(tran_TPM_bl_with_symbol$symbol))
+length(unique(tran_TPM_bl_with_symbol$symbol))
+
+# removes duplicated and NA symbols then checks that all symbols are unique
+# credit to https://www.rdocumentation.org/packages/base/versions/3.6.2/topics/duplicated
+# for help with the duplicated function
+tran_TPM_bl_with_symbol <- tran_TPM_bl_with_symbol[!duplicated(tran_TPM_bl_with_symbol$symbol),] %>% dplyr::filter(!is.na(symbol))
+length(tran_TPM_bl_with_symbol$symbol)
+length(!is.na(tran_TPM_bl_with_symbol$symbol))
+length(unique(tran_TPM_bl_with_symbol$symbol))
+
+# sets the symbols to be the row names and examines the head of the data frame
+rownames(tran_TPM_bl_with_symbol) <- NULL
+tran_TPM_bl_with_symbol <- tran_TPM_bl_with_symbol %>% column_to_rownames("symbol")
+head(tran_TPM_bl_with_symbol)
+```
+
+```{r}
+# performs deconvolution analysis on the TPM transcriptomic data 
+# uses the xcell method for the deconvolution analysis
+# credit to https://omnideconv.org/immunedeconv/articles/immunedeconv.html
+# and https://www.rdocumentation.org/packages/immunedeconv/versions/2.0.3/topics/deconvolute
+# and https://github.com/dviraran/xCell
+# for help with this method
+deconv_results <- immunedeconv::deconvolute(as.matrix(tran_TPM_bl_with_symbol), "xcell") %>% column_to_rownames("cell_type")
+deconv_results
+```
+
+```{r}
+# performs wilcoxon tests on differences in each cell type across groups
+# calculates the adjusted p-values and then sorts the results
+wilcox_by_cell_type_results <- sapply(row.names(deconv_results), function(c_type){
+  
+    wilcox.test(unlist(deconv_results[c_type, group_1_to_compare]), unlist(deconv_results[c_type, group_2_to_compare]))$p.value
+}) %>% p.adjust(method = "BH") %>% sort()
+
+wilcox_by_cell_type_results
+
+
+# acquires the wilcoxon effect sizes for differences in each cell type across groups
+wilcox_effsize_by_cell_type_results <- sapply(names(wilcox_by_cell_type_results), function(c_type){
+  
+    wilcox_effsize(data.frame(deconv_exp = unlist(deconv_results[c_type,]), deconv_group = case_when(colnames(deconv_results) %in% group_1_to_compare ~ "Group 1", colnames(deconv_results) %in% group_2_to_compare ~ "Group 2")), deconv_exp ~ deconv_group)$effsize
+})
+
+wilcox_effsize_by_cell_type_results
+```
+
+```{r}
+# creates boxplots to examine the direction of differences in each cell type across groups
+sapply(names(wilcox_by_cell_type_results), function(c_type){boxplot(list("Group 1" = unlist(deconv_results[c_type, group_1_to_compare]), "Group 2" = unlist(deconv_results[c_type, group_2_to_compare])), main = c_type)})
+
+# export a CSV of the significant results
+# credit to https://www.rdocumentation.org/packages/VFP/versions/1.4/topics/Signif
+# for help with the signif function
+write.csv(data.frame(rank = c(1:length(wilcox_by_cell_type_results)), cell_type = names(wilcox_by_cell_type_results), BH_adj_pvalue = signif(unlist(wilcox_by_cell_type_results), digits = 2), wilcox_effect_size = signif(unlist(wilcox_effsize_by_cell_type_results), digits = 2), depleted_or_enriched = sapply(names(wilcox_by_cell_type_results), function(c_type){case_when(median(unlist(deconv_results[c_type, group_1_to_compare])) > median(unlist(deconv_results[c_type, group_2_to_compare])) ~ "Depleted", TRUE ~ "Enriched")})) %>% dplyr::filter(BH_adj_pvalue < 0.05), file.path(main_directory, "deconvolution analysis significant results.csv"))
+```
+
+### The following code explores GSEA according to beta values from the latent dimensions of iClusterBayes
+
+```{r}
+
+# for beta values from the 1st latent dimension of iClusterBayes
+
+set.seed(648)
+
+# runs the gsea analysis
+# credit to https://www.rdocumentation.org/packages/clusterProfiler/versions/3.0.4/topics/gseGO
+# for help with this code.
+gsea_results_upreg <- gseGO(geneList = latent_dim_1_betas,
+                            OrgDb = "org.Hs.eg.db",
+                            keyType = 'ENSEMBL',
+                            ont = "ALL")
+
+
+# creates dot plots of the gsea results
+# credit to https://github.com/YuLab-SMU/DOSE/issues/20
+# for help with this code
+dotplot(gsea_results_upreg, x="NES", split = ".sign", font.size = 8, showCategory = 10) + facet_grid(~.sign) + ggtitle("618 tran features - iClusterBayes Latent Dim 1 - ALL")
+```
+
+```{r}
+# for beta values from the 2nd latent dimension of iClusterBayes
+
+set.seed(648)
+
+# runs the gsea analysis
+# credit to https://www.rdocumentation.org/packages/clusterProfiler/versions/3.0.4/topics/gseGO
+# for help with this code.
+gsea_results_upreg <- gseGO(geneList = latent_dim_2_betas,
+                            OrgDb = "org.Hs.eg.db",
+                            keyType = 'ENSEMBL',
+                            ont = "ALL")
+
+
+# creates dot plots of the gsea results
+# credit to https://github.com/YuLab-SMU/DOSE/issues/20
+# for help with this code
+dotplot(gsea_results_upreg, x="NES", split = ".sign", font.size = 8, showCategory = 10) + facet_grid(~.sign) + ggtitle("618 tran features - iClusterBayes Latent Dim 2 - ALL")
+```
+
+
+

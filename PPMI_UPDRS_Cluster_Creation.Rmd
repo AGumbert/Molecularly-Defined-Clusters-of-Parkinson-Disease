@@ -1,0 +1,135 @@
+---
+title: "PPMI UPDRS-Based Cluster Creation"
+author: "Andrew Gumbert"
+date: "September 2025 - April 2026"
+output: html_document
+---
+
+Description:
+
+Creates clusters of sporadic PD cases based on UPDRS data from the PPMI curated data set. Uses longitudinal k-means clustering from the kml package. The clusters are based on UPDRS total scores from the first three years after baseline. The clusters generated in this file are used for downstream analyses in PPMI_Data_Exploration_Transcriptomics_based_on_UPDRS.Rmd and PPMI_Data_Exploration_Proteomics_based_on_UPDRS.Rmd. After creating clusters, this file visualizes descriptive and summary statistics relevant to each cluster.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyverse)
+library(longitudinalData)
+library(kml)
+```
+
+```{r}
+main_directory <- "/Users/Andrew/Desktop/PPMI_Data_Files"
+```
+
+```{r}
+# Reads in the curated data set containing information for each participant
+# Credit to https://stackoverflow.com/questions/7049272/importing-excel-files-into-r-xlsx-or-xls
+# for help with this code
+curated_data <- read_excel(file.path(main_directory, "PPMI_Curated_Data_Cut_Public_20251112.xlsx"), sheet = 1)
+```
+
+#### The following code blocks create clusters based on longitudinal UPDRS scores
+
+```{r}
+# filters to just sporadic PD and relevant columns
+curated_data_sporadic <- curated_data %>% dplyr::filter(subgroup == "Sporadic PD") %>% dplyr::select(PATNO, YEAR, updrs_totscore)
+
+# formats the labels for each year
+curated_data_sporadic$YEAR <- paste0("Y", curated_data_sporadic$YEAR)
+
+# gets the UPDRS totscores by year in a wide data frame
+UPDRS_by_year <- curated_data_sporadic %>% pivot_wider(id_cols = PATNO, names_from = YEAR, values_from = updrs_totscore)
+
+# selects for data from baseline to year 3
+UPDRS_by_year <- UPDRS_by_year %>% dplyr::select("PATNO", "Y0", "Y1", "Y2", "Y3")
+
+# checks to make sure no participant entries are repeated
+nrow(UPDRS_by_year) == length(unique(UPDRS_by_year$PATNO))
+
+# renames PATNO to id
+# credit to https://dplyr.tidyverse.org/reference/rename.html
+# for help with the rename function.
+UPDRS_by_year <- UPDRS_by_year %>% dplyr::rename(id = PATNO)
+```
+
+```{r}
+# gets number of participants in the sporadic data considered for longitudinal k-means clustering
+nrow(UPDRS_by_year)
+```
+
+
+
+
+```{r}
+# creates longitudinal clustering object
+set.seed(648)
+cld_UPDRS_by_year <- cld(data.frame(UPDRS_by_year))
+```
+
+
+```{r}
+# performs longitudinal k-means clustering and finds ideal number of clusters
+set.seed(648)
+kml(cld_UPDRS_by_year, nbRedrawing = 3, toPlot = "both")
+set.seed(648)
+try(choice(cld_UPDRS_by_year))
+```
+
+
+```{r}
+# stores cluster assignments corresponding to participant ids
+patient_clusters_overall <- data.frame(patient_id = UPDRS_by_year$id, clust = kml::getClusters(cld_UPDRS_by_year, 2)) %>% arrange(patient_id)
+
+cluster_A_patients_overall <- (patient_clusters_overall %>% dplyr::filter(clust == "A"))$patient_id
+cluster_B_patients_overall <- (patient_clusters_overall %>% dplyr::filter(clust == "B"))$patient_id
+```
+
+```{r}
+length(cluster_A_patients_overall)
+length(cluster_B_patients_overall)
+```
+
+
+
+
+#### The following code block tests for differences in individual sections of the UPDRS by longitudinal cluster
+
+```{r, warning=FALSE}
+# Gets plots and statistical comparisons of the longitudinal UPDRS data in each of the two UPDRS-defined clusters
+get_UPDRS_overview_by_groups(cluster_A_patients_overall, cluster_B_patients_overall, "Cluster A", "Cluster B")
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+# tests missingness in the UPDRS totscore at each year after baseline
+
+# gets the fraction of participants with available data overall at each year
+sapply(c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"), function(year){1 - mean(is.na((curated_data %>% dplyr::select(PATNO, YEAR, updrs_totscore) %>% pivot_wider(id_cols = PATNO, names_from = YEAR, values_from = updrs_totscore))[[year]]))})
+
+# gets the fraction of participants with sporadic PD with available data at each year
+sapply(c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"), function(year){1 - mean(is.na((curated_data %>% dplyr::filter(subgroup == "Sporadic PD") %>% dplyr::select(PATNO, YEAR, updrs_totscore) %>% pivot_wider(id_cols = PATNO, names_from = YEAR, values_from = updrs_totscore))[[year]]))})
+```
+
+
+
+
+
