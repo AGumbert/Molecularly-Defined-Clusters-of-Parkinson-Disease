@@ -1294,6 +1294,10 @@ chisq.test(SAA_contingency_table)
 
 
 ```{r}
+
+# gets the number of participants with available mean TTT values by cluster
+table((SAA_results %>% dplyr::filter(!is.na(mean_TTT_150h)))$clust)
+
 # visualizes and tests for differences in mean TTT 150h by clust
 
 ggplot(SAA_results, aes(x = clust, y = mean_TTT_150h, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + labs(x = "Cluster", y = "Mean TTT (Hours)") + theme(legend.position = "none") + theme_bw()
@@ -1304,6 +1308,10 @@ kruskal.test(mean_TTT_150h ~ clust, SAA_results)
 
 
 ```{r}
+
+# gets the number of participants with available mean T50 values by cluster
+table((SAA_results %>% dplyr::filter(!is.na(mean_T50_150h)))$clust)
+
 # visualizes and tests for differences in mean T50 150h by clust
 
 ggplot(SAA_results, aes(x = clust, y = mean_T50_150h, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + labs(x = "Cluster", y = "Mean T50 (Hours)") + theme(legend.position = "none") + theme_bw()
@@ -1313,6 +1321,11 @@ kruskal.test(mean_T50_150h ~ clust, SAA_results)
 ```
 
 ```{r}
+
+# gets the number of participants with available mean AUC values by cluster
+table((SAA_results %>% dplyr::filter(!is.na(mean_AUC_150h)))$clust)
+
+
 # visualizes and tests for differences in mean AUC 150h by clust
 
 ggplot(SAA_results, aes(x = clust, y = mean_AUC_150h, fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + labs(x = "Cluster", y = "Mean AUC (Fluorescence Across Time)") + theme(legend.position = "none") + theme_bw()
@@ -1320,6 +1333,71 @@ ggplot(SAA_results, aes(x = clust, y = mean_AUC_150h, fill = clust)) + scale_fil
 # performs kruskal test to get significance of mean AUC 150h differences across clusters.
 kruskal.test(mean_AUC_150h ~ clust, SAA_results)
 ```
+
+#### The following code tests for differences in DaTscan measurements by cluster
+
+
+```{r}
+
+# loads the DaTscan data and filters to relevant participants and screening visits
+DaTscan_df <- read.csv(file.path(main_directory, "DaTScan_Analysis_05Jan2024.csv"))
+DaTscan_df <- DaTscan_df %>% dplyr::filter(PATNO %in% cases_with_selected_omics_data & EVENT_ID %in% c("SC")) %>% dplyr::arrange("PATNO")
+
+# ensures all DaTscans were analyzed and have the same protocol 
+table(DaTscan_df$DATSCAN_ANALYZED)
+table(DaTscan_df$PROTOCOL)
+
+# checks to ensure there are no duplicate scans for individual participants
+length(DaTscan_df$PATNO)
+length(unique(DaTscan_df$PATNO))
+
+# assigns the cluster variable to each DaTscan result
+DaTscan_df <- DaTscan_df %>% mutate(clust = 
+                                        case_when(PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 1]
+                                                      ~ 1,
+                                                  PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 2]
+                                                      ~ 2,
+                                                  PATNO %in%
+                                                     cases_with_selected_omics_data[
+                                                     icluster_results_full_sporadic_cohort$clusters == 3]
+                                                      ~ 3))
+DaTscan_df$clust <- as.factor(DaTscan_df$clust)
+
+# shows the numbers of available scans per cluster
+table(DaTscan_df$clust)
+```
+
+```{r}
+# defines a function to create a plot and run a Kruskal-Wallis test on DaTscan data
+# the function takes a brain region of interest as input
+# creates a plot and performs the statistical test for the given brain region
+analyze_DaTscan_SBR_from_brain_region <- function(brain_region){
+  
+    # prints the brain region for reference
+    print(brain_region)
+
+    # generates the box plot and jitter plot for SBR data by cluster in the given brain region
+    print(ggplot(DaTscan_df, aes(x = clust, y = get(brain_region), fill = clust)) + scale_fill_manual(values = cluster_colors) + geom_boxplot(alpha = 0.7) + geom_jitter(width = 0.2) + labs(title = brain_region, x = "Cluster", y = "SBR") + scale_y_continuous(breaks = seq(0, 4, by = 1)) + theme_bw() + theme(legend.position = "none", axis.text = element_text(size = 24), axis.title = element_text(size = 24), aspect.ratio = 1)) 
+
+    # prints the results of a Kruskal-Wallis test for the SBR values by cluster
+    print(kruskal.test(get(brain_region) ~ clust, DaTscan_df))
+}
+
+# runs the analysis from the function above for the left and right caudate and putamen
+analyze_DaTscan_SBR_from_brain_region("DATSCAN_CAUDATE_R")
+analyze_DaTscan_SBR_from_brain_region("DATSCAN_CAUDATE_L")
+analyze_DaTscan_SBR_from_brain_region("DATSCAN_PUTAMEN_R")
+analyze_DaTscan_SBR_from_brain_region("DATSCAN_PUTAMEN_L")
+
+```
+
+
+
+
 
 
 
