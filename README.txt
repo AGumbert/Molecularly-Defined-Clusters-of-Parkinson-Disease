@@ -105,7 +105,7 @@ This file requires access to:
 This file results in:
 
 - Creation of newline-separated list of selected features in "selected_transcriptomic_features_from_UPDRS_A_vs_B.txt", useful for exporting to other files for analysis, including PPMI_Molecular_Cluster_Creation_UPDRS_features.Rmd.
-- Creation of comma-separated list of selected features in "selected_transcriptomic_features_from_UPDRS_A_vs_B_comma_separated.txt", useful for copying to analyses in AMP. 
+- Creation of comma-separated list of selected features in "selected_transcriptomic_features_from_UPDRS_A_vs_B_comma_separated.txt". 
 - Creation of newline-separated list of selected features without the version number in "selected_transcriptomic_features_from_UPDRS_A_vs_B_no_version.txt", useful for external gene set analysis.
 
 
@@ -113,7 +113,7 @@ This file results in:
 
 Description:
 
-This file  considers the UPDRS-based clusters from PPMI_UPDRS_Cluster_Creation.Rmd. The file also considers plasma, CSF, and urine proteomics data from Olink, SomaScan, and mass spectrometry. The code in this file acquires the numbers of cases with usable data from each type of proteomic modality. The file finds proteins that have relatively high differential expression by UPDRS cluster to identify candidate features for the creation of molecularly defined clusters. The resulting differentially expressed features are saved in text files, enabling further analyses and cluster creation. 
+This file considers the UPDRS-based clusters from PPMI_UPDRS_Cluster_Creation.Rmd. The file also considers plasma, CSF, and urine proteomics data from Olink, SomaScan, and mass spectrometry. The code in this file acquires the numbers of cases with usable data from each type of proteomic modality. The file finds proteins that have relatively high differential expression by UPDRS cluster to identify candidate features for the creation of molecularly defined clusters. The resulting differentially expressed features are saved in text files, enabling further analyses and cluster creation. 
 
 The file requires access to:
 
@@ -143,6 +143,8 @@ This file requires access to:
 - List of selected CSF proteomic features in "selected_proteomic_features_CSF_from_UPDRS_A_vs_B.txt".
 - Downstream analyses use the function defined in Get_UPDRS_Overview_By_Groups.Rmd.
 - Downstream analyses use Genomic data in PPMI_Project_9001_20250624_21Oct2025.csv (in "main_directory/Genomic_Analysis").
+- Downstream analyses use Seed Amplification Assay data from "SAA_Biospecimen_Analysis_Results_21Feb2025.csv".
+- Downstream analyses use DaTscan data from "DaTScan_Analysis_05Jan2024.csv".
 
 This file results in:
 
