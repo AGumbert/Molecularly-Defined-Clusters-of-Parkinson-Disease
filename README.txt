@@ -9,6 +9,8 @@ Citation for the thesis project:
 
 Gumbert, A. B. (2026). Investigating Molecularly Defined Clusters of Parkinson’s Disease Based on Multi-Omics Data With Clinical and Biological Implications (Order No. 32699177) [Master’s thesis, Harvard Medical School]. Available from ProQuest Dissertations & Theses Global. (3344109178). https://www.proquest.com/docview/3344109178.
 
+Note that updates to the available data over time may result in some differences between the most up-to-date analyses and the original analyses in the thesis report. 
+
 
 Here is a brief overview of the current files in the processing pipelines in this repository.
 
