@@ -566,19 +566,6 @@ icluster_metadata_full_sporadic_cohort <- data.frame(PATNO = cases_with_selected
 
 icluster_metadata_full_sporadic_cohort
 
-# extracts the principal components from the expression data
-# credit to https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/prcomp
-# for help with this code
-#icluster_results_pca <- as.data.frame(prcomp(cbind(transcriptomics_for_icluster_full_sporadic_cohort, urine_proteomics_for_icluster_full_sporadic_cohort, CSF_proteomics_for_icluster_full_sporadic_cohort))$x) %>% mutate(clust = as.factor(icluster_results_full_sporadic_cohort$clusters))
-
-# extracts the variance explained by each PC
-# credit to https://stackoverflow.com/questions/62422277/how-to-obtain-principal-component-variance-explained-in-r-prcomp-and-prepro
-# for help with this code.
-#icluster_pca_var_pcts <- round(summary(prcomp(cbind(transcriptomics_for_icluster_full_sporadic_cohort, urine_proteomics_for_icluster_full_sporadic_cohort, CSF_proteomics_for_icluster_full_sporadic_cohort)))$importance[2,] * 100, 1)
-
-# plots the top 2 PCs colored by cluster
-#ggplot(icluster_results_pca, aes(x = PC1, y = PC2, color = clust)) + geom_point() + labs(title = "PCs 1 & 2 of iClusterBayes results, colored according to cluster", x = paste0("PC1 (", icluster_pca_var_pcts[1], "%)"), y = paste0("PC2 (", icluster_pca_var_pcts[2], "%)")) + scale_color_manual(values = cluster_colors)
-
 
 # creates plots showing the proportions of UPDRS-based and proteomic-based clusters in each cluster from iClusterBayes.
 
