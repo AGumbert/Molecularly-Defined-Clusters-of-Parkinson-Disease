@@ -857,9 +857,6 @@ head(genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort)
 ```{r}
 # plots the cases from integrative clustering with color indicating genetic group
 
-ggplot(data.frame(PC1 = icluster_results_pca$PC1, PC2 = icluster_results_pca$PC2, ancestry_group = genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$ancestry_group), aes(x = PC1, y = PC2, color = as.factor(ancestry_group))) + geom_point() + labs(color = "Ancestry Group", x = paste0("PC1 (", icluster_pca_var_pcts[1], "%)"), y = paste0("PC2 (", icluster_pca_var_pcts[2], "%)"))
-
-
 ggplot(data.frame(x_val = icluster_results_full_sporadic_cohort$meanZ[,1], y_val = icluster_results_full_sporadic_cohort$meanZ[,2], ancestry_group = genetic_info_of_cases_sporadic_clustering_full_sporadic_cohort$ancestry_group), aes(x = x_val, y = y_val, color = as.factor(ancestry_group))) + geom_point() + labs(color = "Ancestry Group", x = "1st meanZ value from iClusterBayes", y = "2nd meanZ value from iClusterBayes")
 ```
 
